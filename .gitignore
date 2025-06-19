@@ -109,4 +109,8 @@ venv.bak/
 models/
 *.o
 *.out
+*.err
 config/200607/
+
+# docs folder
+docs/
