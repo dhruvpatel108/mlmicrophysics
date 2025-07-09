@@ -1,0 +1,230 @@
+# Streaming + Parallel Training Configuration for Constraint-Aware Microphysics Emulator
+# Designed to handle large datasets (1.2B+ samples) with multi-GPU training
+# Similar to the original paper's setup with 4 V100 GPUs
+
+experiment:
+  name: "streaming_parallel_emulator"
+  version: "v2.0"
+  description: "Streaming data loading + multi-GPU training for large-scale microphysics emulation"
+  framework: "pytorch"
+  
+# Data Configuration - Streaming Setup
+data:
+  # Data paths (NERSC-specific)
+  data_path: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/e3sm/processed_data/"
+  out_path: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/pytorch_streaming_outputs/"
+  scaler_cache_dir: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/scaler_cache/"
+  
+  # Input/Output columns
+  input_cols: 
+    - "QC_TAU_in"              # Cloud water mixing ratio
+    - "QR_TAU_in"              # Rain water mixing ratio  
+    - "NC_TAU_in"              # Cloud droplet number concentration
+    - "NR_TAU_in"              # Rain droplet number concentration
+    - "PGAM"                   # Gamma distribution shape parameter
+    - "LAMC"                   # Cloud droplet size distribution parameter
+    - "LAMR"                   # Rain droplet size distribution parameter
+    - "N0R"                    # Rain droplet intercept parameter
+    - "RHO_CLUBB"              # Air density from CLUBB
+    - "CLOUD"                  # Cloud fraction
+    - "FREQR"                  # Rain frequency
+    
+  output_cols: 
+    - "qctend_TAU"             # Cloud water tendency
+    - "nctend_TAU"             # Cloud droplet number tendency
+    - "nrtend_TAU"             # Rain droplet number tendency
+  
+  # Streaming data loading parameters
+  chunk_size: 100000           # Samples per chunk (increased for better throughput)
+  max_files: null              # Use ALL available files (762 files for full dataset)
+  subsample: 1.0               # Use 100% of data (1.2B+ samples total)
+  train_fraction: 0.8          # 80% for training, 20% for validation
+  
+  # Data loader parameters  
+  batch_size: 2048             # Large batch size for multi-GPU (effective batch = batch_size * num_gpus)
+  num_workers: 4               # Parallel data loading workers (adjust based on CPUs)
+  
+  # Scaler fitting parameters
+  scaler_fit_samples: 500000   # Samples to use for fitting input scaler
+  
+  # Data preprocessing
+  active_threshold: 1e-8       # Threshold for active/quiescent classification
+  random_seed: 42
+
+# Model Configuration - Constraint-Aware Architecture
+model:
+  # Architecture 
+  input_dim: 11                # Length of input_cols
+  shared_dims: [512, 256, 128] # Larger network for better capacity
+  head_dim: 64                 # Dimension of individual heads
+  dropout: 0.15                # Increased dropout for regularization
+  activation: "relu"
+  
+  # Physical constraints
+  constraint_enforcement: true
+  mass_conservation: true      # qc_tend = -qr_tend
+  
+  # Loss function configuration
+  alpha: 0.3                   # Weight for classification vs regression loss
+  huber_delta: 1.0             # Huber loss parameter for robustness
+  conservation_weight: 0.1     # Weight for mass conservation loss
+  use_masking: true            # Only compute regression loss on active samples
+
+# Training Configuration - Optimized for Multi-GPU
+training:
+  # Training parameters
+  epochs: 50                   # More epochs for larger datasets
+  learning_rate: 0.001         # Will be scaled by number of GPUs automatically
+  weight_decay: 1e-5           # L2 regularization
+  
+  # Multi-GPU and distributed training
+  gradient_accumulation_steps: 1  # Accumulate gradients (effective_batch = batch_size * accumulation_steps * num_gpus)
+  use_amp: true                # Mixed precision training for memory efficiency
+  
+  # Optimization
+  optimizer: "adamw"           # AdamW generally better for large-scale training
+  scheduler: "cosine"          # Cosine annealing for better convergence
+  scheduler_params:
+    T_max: 50                  # Match number of epochs
+    eta_min: 1e-7              # Minimum learning rate
+  
+  # Regularization and stability
+  gradient_clip_norm: 1.0      # Gradient clipping for stability
+  early_stopping_patience: 10 # Patience for early stopping
+  
+  # Device configuration
+  device: "auto"               # Auto-detect GPU/CPU
+
+# Logging Configuration
+logging:
+  log_level: "INFO"
+  save_checkpoints: true
+  checkpoint_frequency: 5      # Save checkpoint every 5 epochs
+  
+  # Weights & Biases configuration
+  wandb:
+    project: "streaming-parallel-microphysics"
+    entity: null               # Replace with your W&B username
+    group: "large_scale_training"
+    job_type: "multi_gpu_training"
+    tags: ["pytorch", "streaming", "parallel", "constraint_aware", "large_scale"]
+
+# Hardware Configuration - Multi-GPU Setup
+hardware:
+  # Single-node multi-GPU (DataParallel)
+  single_node:
+    gpus: 4                    # Number of GPUs on single node
+    memory_per_gpu: "40GB"     # A100 GPU memory
+    total_memory: "160GB"      # Total GPU memory
+  
+  # Multi-node distributed training (DistributedDataParallel)
+  distributed:
+    nodes: 2                   # Number of nodes
+    gpus_per_node: 4           # GPUs per node
+    total_gpus: 8              # Total GPUs across all nodes
+    cpus_per_gpu: 8            # CPU cores per GPU
+    memory_per_node: "240GB"   # System memory per node
+
+# Performance Benchmarks and Targets
+performance:
+  # Expected throughput (samples/second)
+  target_throughput:
+    single_gpu: 5000           # Baseline single GPU
+    multi_gpu_4: 18000         # 4 GPUs (3.6x speedup due to overhead)
+    distributed_8: 35000       # 8 GPUs distributed (7x speedup)
+  
+  # Expected training times for full dataset (1.2B samples, 50 epochs)
+  estimated_time:
+    single_gpu: "48 hours"     # Baseline
+    multi_gpu_4: "14 hours"    # 4 GPUs
+    distributed_8: "7 hours"   # 8 GPUs distributed
+  
+  # Memory usage estimates
+  memory_usage:
+    model_params: "~200MB"     # Model parameters
+    optimizer_state: "~600MB"  # Optimizer state
+    batch_memory: "~2GB"       # Per batch (batch_size=2048)
+    streaming_buffer: "~1GB"   # Streaming data buffer
+
+# Evaluation Configuration
+evaluation:
+  # Evaluation frequency
+  eval_frequency: 5            # Evaluate every 5 epochs
+  
+  # Metrics to compute
+  compute_physics_metrics: true
+  compute_regime_metrics: true
+  
+  # Physics constraint validation
+  constraint_tolerance:
+    qrtend_min: 0.0            # qrtend must be >= 0
+    nctend_max: 0.0            # nctend must be <= 0  
+    mass_conservation: 1e-6    # Mass conservation tolerance
+    
+  # Regime analysis
+  active_threshold: 1e-8       # Same as data preprocessing
+
+# Advanced Configuration
+advanced:
+  # Memory optimization
+  pin_memory: true             # Pin memory for faster GPU transfer
+  persistent_workers: true     # Keep data loader workers alive between epochs
+  
+  # Numerical stability
+  use_deterministic: false     # Set to true for reproducibility (slower)
+  benchmark_mode: true         # Enable cudnn benchmarking for speed
+  
+  # Checkpointing strategy
+  save_top_k: 3               # Keep top 3 checkpoints
+  save_last: true             # Always save last checkpoint
+  
+  # Recovery and fault tolerance
+  auto_resume: true           # Automatically resume from latest checkpoint
+  checkpoint_every_n_steps: 5000  # Emergency checkpoint frequency (in training steps)
+
+# Data Pipeline Optimization
+data_pipeline:
+  # Streaming optimizations
+  prefetch_factor: 2          # Number of batches to prefetch
+  shuffle_buffer_size: 200000 # Size of shuffle buffer for streaming
+  
+  # I/O optimizations  
+  use_memory_mapping: false   # Memory-mapped files (for very large datasets)
+  compression: "snappy"       # Parquet compression (snappy/gzip/lz4)
+  
+  # Preprocessing optimizations
+  vectorized_preprocessing: true  # Use vectorized operations
+  cache_preprocessed: false   # Cache preprocessed chunks (uses more memory)
+
+# Experiment Tracking
+tracking:
+  # Metrics to track
+  primary_metric: "val_loss"
+  secondary_metrics:
+    - "train_loss"
+    - "conservation_loss" 
+    - "classification_accuracy"
+    - "active_fraction"
+  
+  # Performance tracking
+  track_throughput: true
+  track_memory_usage: true
+  track_gpu_utilization: true
+  
+  # Model versioning
+  model_registry: "pytorch_models"
+  version_format: "v{epoch:03d}_{val_loss:.6f}"
+
+# Resource Limits and Quotas
+resources:
+  # Time limits
+  max_training_time: "6:00:00"  # SLURM time limit
+  checkpoint_time_buffer: "10:00" # Save checkpoint this many minutes before timeout
+  
+  # Memory limits (per process)
+  max_memory_usage: "200GB"    # Maximum memory per training process
+  oom_detection: true          # Detect and handle out-of-memory errors
+  
+  # Storage limits
+  max_checkpoint_size: "10GB"  # Maximum size per checkpoint
+  cleanup_old_checkpoints: true # Automatically clean up old checkpoints 

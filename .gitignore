@@ -106,7 +106,7 @@ venv.bak/
 # Other settings
 .DS_Store
 .idea/
-models/
+#models/
 *.o
 *.out
 *.err
