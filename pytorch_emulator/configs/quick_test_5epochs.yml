@@ -1,0 +1,103 @@
+# Quick Test Configuration - 5 Epochs
+# Fast training configuration for initial validation
+
+# Model Configuration
+model:
+  # Architecture (smaller for quick training)
+  input_dim: 11
+  shared_dims: [128, 64, 32]
+  head_dim: 16
+  dropout: 0.1
+  
+  # Loss function parameters
+  alpha: 0.3                    # Balance classification vs regression
+  huber_delta: 1.0              # Huber loss delta parameter
+  conservation_weight: 0.1      # Weight for mass conservation penalty
+  use_masking: true             # Only compute regression loss on active samples
+
+# Training Configuration  
+training:
+  epochs: 1                     # Super quick - just 1 epoch
+  learning_rate: 0.001
+  weight_decay: 0.00001         # Fixed: was 1e-5
+  gradient_clip_norm: 1.0
+  early_stopping_patience: 10   # Won't trigger in 1 epoch
+  
+  # Optimizer
+  optimizer: "adam"
+  
+  # Learning rate scheduler
+  scheduler: "reduce_lr_on_plateau"
+  scheduler_params:
+    mode: "min"
+    factor: 0.7
+    patience: 2
+    min_lr: 0.000001            # Fixed: was 1e-6
+
+# Data Configuration
+data:
+  # Paths (NERSC-specific)
+  data_path: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/e3sm/processed_data/"
+  out_path: "./quick_test_outputs/"
+  
+  # Data loading (ultra-fast settings)
+  max_files: 3                  # Even fewer files
+  subsample: 0.02               # Only 2% of data
+  train_fraction: 0.8           # Train/val split
+  batch_size: 500               # Larger batches for speed
+  random_seed: 42
+  
+  # Feature columns
+  input_cols:
+    - "QC_TAU_in"              # Cloud water mixing ratio
+    - "QR_TAU_in"              # Rain water mixing ratio  
+    - "NC_TAU_in"              # Cloud droplet number concentration
+    - "NR_TAU_in"              # Rain droplet number concentration
+    - "PGAM"                   # Gamma distribution shape parameter
+    - "LAMC"                   # Cloud droplet size distribution parameter
+    - "LAMR"                   # Rain droplet size distribution parameter
+    - "N0R"                    # Rain droplet intercept parameter
+    - "RHO_CLUBB"              # Air density from CLUBB
+    - "CLOUD"                  # Cloud fraction
+    - "FREQR"                  # Rain frequency
+    
+  output_cols:
+    - "qctend_TAU"             # Cloud water tendency
+    - "nctend_TAU"             # Cloud droplet number tendency
+    - "nrtend_TAU"             # Rain droplet number tendency
+
+# Logging Configuration
+logging:
+  log_level: "INFO"
+  save_checkpoints: true
+  checkpoint_frequency: 1       # Save every epoch for quick test
+  
+  # Weights & Biases (optional)
+  wandb:
+    project: null               # Disable for quick test
+    entity: null
+
+# Evaluation Configuration
+evaluation:
+  # Metrics to compute
+  compute_physics_metrics: true
+  compute_regime_metrics: true
+  
+  # Physics constraint validation
+  constraint_tolerance:
+    qrtend_min: 0.0             
+    nctend_max: 0.0             
+    mass_conservation: 0.000001 # Fixed: was 1e-6     
+    
+  # Regime analysis
+  active_threshold: 0.00000001  # Fixed: was 1e-8
+
+# Experiment Configuration
+experiment:
+  name: "quick_test_5epochs"
+  description: "Quick 5-epoch test run for validation"
+  version: "1.0"
+  
+  # Reproducibility
+  seed: 42
+  deterministic: true 

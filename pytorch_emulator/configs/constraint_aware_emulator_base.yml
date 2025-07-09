@@ -1,0 +1,120 @@
+experiment:
+  name: "constraint_aware_emulator"
+  version: "v1.0"
+  description: "PyTorch implementation of constraint-aware multi-head emulator"
+  framework: "pytorch"
+
+data:
+  # Use your processed data path
+  data_path: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/e3sm/processed_data/"
+  scratch_path: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/pytorch_experiments/"
+  out_path: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/pytorch_models/"
+  
+  input_cols: ["QC_TAU_in", "QR_TAU_in", "NC_TAU_in", "NR_TAU_in", "PGAM", "LAMC", "LAMR", "N0R", "RHO_CLUBB", "CLOUD", "FREQR"]
+  output_cols: ["qctend_TAU", "nctend_TAU", "nrtend_TAU"]  # Added qrtend_TAU for physics constraints
+  
+  # Data transformations (log transform for skewed variables)
+  input_transforms:
+    QC_TAU_in: "log10_transform"
+    QR_TAU_in: "log10_transform" 
+    NC_TAU_in: "log10_transform"
+    NR_TAU_in: "log10_transform"
+    LAMC: "log10_transform"
+    LAMR: "log10_transform"
+    N0R: "log10_transform"
+    # Others remain untransformed
+  
+  output_transforms:
+    qctend_TAU: "log10_transform"
+    nctend_TAU: "neg_log10_transform" 
+    nrtend_TAU: "log10_transform"
+    qrtend_TAU: "log10_transform"
+  
+  qc_thresh: 1e-8
+  subsample: 0.01
+  random_seed: 215689
+  
+  subset_data:
+    train_date_start: 0
+    train_date_end: 12500
+    test_date_start: 12501
+    test_date_end: 18000
+    validation_frequency: 3
+
+model:
+  # Constraint-aware multi-head architecture
+  architecture: "constraint_aware"
+  input_dim: 11  # Length of input_cols
+  
+  # Shared backbone configuration
+  shared_dims: [256, 128]  # Hidden layer dimensions
+  head_dim: 64  # Dimension of individual heads
+  
+  # Regularization
+  dropout: 0.1
+  activation: "relu"
+  
+  # Physical constraints
+  constraint_enforcement: true
+  mass_conservation: true  # qc_tend = -qr_tend
+  
+  # Loss function configuration
+  alpha: 0.3  # Weight for classification vs regression loss
+  huber_delta: 1.0  # Huber loss parameter
+  conservation_weight: 0.1  # Weight for mass conservation loss
+
+training:
+  # Training parameters
+  epochs: 100  # More epochs for PyTorch training
+  batch_size: 1024
+  learning_rate: 0.001
+  weight_decay: 1e-5  # L2 regularization
+  
+  # Optimization
+  optimizer: "adam"
+  scheduler: "reduce_lr_on_plateau"
+  scheduler_params:
+    mode: "min"
+    factor: 0.5
+    patience: 5
+    min_lr: 1e-7
+  
+  # Early stopping
+  early_stopping_patience: 15
+  
+  # Gradient clipping
+  gradient_clip_norm: 1.0
+  
+  # Device
+  device: "auto"  # Will auto-detect GPU/CPU
+
+logging:
+  # Weights & Biases configuration
+  wandb:
+    project: "constraint-aware-microphysics"
+    entity: "your_wandb_username"  # Replace with your W&B username
+    group: "constraint_aware_emulator"
+    job_type: "training"
+    tags: ["pytorch", "constraint_aware", "microphysics"]
+  
+  # Local logging
+  local:
+    log_interval: 10  # Log every 10 epochs
+    save_interval: 20  # Save checkpoint every 20 epochs
+    plot_predictions: true
+    plot_interval: 25  # Plot predictions every 25 epochs
+
+checkpointing:
+  save_best: true
+  save_last: true
+  monitor: "val_total_loss"
+  mode: "min"
+  filename_format: "constraint_aware_emulator_epoch_{epoch:03d}_val_{val_total_loss:.6f}.pth"
+
+# Constraint validation thresholds
+constraint_validation:
+  mass_conservation_tolerance: 1e-10
+  tendency_magnitude_bounds:
+    qr_tend: [0, 1e-3]  # Must be >= 0
+    nc_tend: [-1e-2, 0]  # Must be <= 0  
+    nr_tend: [-1e-2, 1e-2]  # Can be positive or negative 

@@ -1,0 +1,104 @@
+# Full Training Configuration - 10 Epochs
+# Production training configuration for high-quality results
+
+# Model Configuration
+model:
+  # Architecture 
+  input_dim: 11
+  shared_dims: [256, 128, 64]  # Larger network for better capacity
+  head_dim: 32                 # Larger heads
+  dropout: 0.2                 # More regularization
+  
+  # Loss function parameters
+  alpha: 0.3                    # Balance classification vs regression
+  huber_delta: 1.0              # Huber loss delta parameter
+  conservation_weight: 0.1      # Weight for mass conservation penalty
+  use_masking: true             # Only compute regression loss on active samples
+
+# Training Configuration  
+training:
+  epochs: 10                   # Full training
+  learning_rate: 0.001
+  weight_decay: 0.00001         
+  gradient_clip_norm: 1.0
+  early_stopping_patience: 15   # Stop if no improvement
+  
+  # Optimizer
+  optimizer: "adam"
+  
+  # Learning rate scheduler
+  scheduler: "reduce_lr_on_plateau"
+  scheduler_params:
+    mode: "min"
+    factor: 0.5                 # Reduce more aggressively
+    patience: 5                 # Reduce sooner
+    min_lr: 0.000001            
+
+# Data Configuration
+data:
+  # Paths (NERSC-specific)
+  data_path: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/e3sm/processed_data/"
+  out_path: "./full_training_outputs/"
+  
+  # Data loading (production settings - use ALL available data!)
+  max_files: null               # Use ALL 762 files for maximum performance
+  subsample: 1.0                # 50% of data for comprehensive training
+  train_fraction: 0.8           # Train/val split
+  batch_size: 256               # Good balance for A100 GPU
+  random_seed: 42
+  
+  # Feature columns
+  input_cols:
+    - "QC_TAU_in"              # Cloud water mixing ratio
+    - "QR_TAU_in"              # Rain water mixing ratio  
+    - "NC_TAU_in"              # Cloud droplet number concentration
+    - "NR_TAU_in"              # Rain droplet number concentration
+    - "PGAM"                   # Gamma distribution shape parameter
+    - "LAMC"                   # Cloud droplet size distribution parameter
+    - "LAMR"                   # Rain droplet size distribution parameter
+    - "N0R"                    # Rain droplet intercept parameter
+    - "RHO_CLUBB"              # Air density from CLUBB
+    - "CLOUD"                  # Cloud fraction
+    - "FREQR"                  # Rain frequency
+    
+  output_cols:
+    - "qctend_TAU"             # Cloud water tendency
+    - "nctend_TAU"             # Cloud droplet number tendency
+    - "nrtend_TAU"             # Rain droplet number tendency
+
+# Logging Configuration
+logging:
+  log_level: "INFO"
+  save_checkpoints: true
+  checkpoint_frequency: 5       # Save every 5 epochs
+  
+  # Weights & Biases (optional)
+  wandb:
+    project: "constraint_aware_microphysics"
+    entity: null
+    name: "full_training_10epochs"
+
+# Evaluation Configuration
+evaluation:
+  # Metrics to compute
+  compute_physics_metrics: true
+  compute_regime_metrics: true
+  
+  # Physics constraint validation
+  constraint_tolerance:
+    qrtend_min: 0.0             
+    nctend_max: 0.0             
+    mass_conservation: 0.000001     
+    
+  # Regime analysis
+  active_threshold: 0.00000001  
+
+# Experiment Configuration
+experiment:
+  name: "full_training_10epochs"
+  description: "Full 10-epoch training on GPU compute node"
+  version: "1.0"
+  
+  # Reproducibility
+  seed: 42
+  deterministic: true 
