@@ -53,7 +53,7 @@ def load_model_and_config(checkpoint_path: str, config_path: str):
         config = yaml.safe_load(f)
     
     # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     
     # Create model
     model_config = config['model']

@@ -67,8 +67,7 @@ def setup_model_and_loss(config: Dict, device: torch.device) -> tuple:
         input_dim=model_config['input_dim'],
         shared_dims=model_config['shared_dims'],
         head_dim=model_config['head_dim'],
-        dropout=model_config.get('dropout', 0.1),
-        activation=model_config.get('activation', 'relu')
+        dropout=model_config.get('dropout', 0.1)
     )
     
     # Create loss function
@@ -170,7 +169,13 @@ def main():
         
         if is_main_process:
             logger.info("✅ Streaming data loaders created successfully")
-        
+            # Print dataset lengths
+            logger.info(f"📊 Dataset sizes:")
+            logger.info(f"   Training dataset: {len(train_loader.dataset):,} samples")
+            logger.info(f"   Validation dataset: {len(val_loader.dataset):,} samples")
+            logger.info(f"   Batch size: {data_config.get('batch_size', 1024)}")
+            logger.info(f"   Training batches: {len(train_loader)}")
+            logger.info(f"   Validation batches: {len(val_loader)}")
         # Setup model and loss
         if is_main_process:
             logger.info("🧠 Setting up model and loss function...")
@@ -236,7 +241,7 @@ def main():
             logger.info(f"   Total epochs: {history['total_epochs']}")
             logger.info(f"   Best validation loss: {history['best_val_loss']:.6f}")
             logger.info(f"   Final training loss: {history['train_losses'][-1]:.6f}")
-            logger.info("   Checkpoints saved to:", trainer.output_dir)
+            logger.info(f"   Checkpoints saved to: {trainer.output_dir}")
             logger.info("=" * 60)
         
         # Cleanup distributed training

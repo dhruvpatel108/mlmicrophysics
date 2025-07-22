@@ -48,7 +48,7 @@ data:
   scaler_fit_samples: 500000   # Samples to use for fitting input scaler
   
   # Data preprocessing
-  active_threshold: 1e-8       # Threshold for active/quiescent classification
+  active_threshold: 1e-12       # Threshold for active/quiescent classification
   random_seed: 42
 
 # Model Configuration - Constraint-Aware Architecture
@@ -162,7 +162,7 @@ evaluation:
     mass_conservation: 1e-6    # Mass conservation tolerance
     
   # Regime analysis
-  active_threshold: 1e-8       # Same as data preprocessing
+  active_threshold: 1e-12       # Same as data preprocessing
 
 # Advanced Configuration
 advanced:

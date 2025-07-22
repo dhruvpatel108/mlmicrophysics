@@ -21,7 +21,6 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.parallel import DataParallel as DP
 from torch.cuda.amp import GradScaler, autocast
-
 import os
 import time
 import json
@@ -90,10 +89,10 @@ class DataParallelTrainer:
         
         # Training configuration
         train_config = config.get('training', {})
-        self.epochs = train_config.get('epochs', 100)
-        self.learning_rate = train_config.get('learning_rate', 0.001)
-        self.weight_decay = train_config.get('weight_decay', 1e-5)
-        self.gradient_clip_norm = train_config.get('gradient_clip_norm', 1.0)
+        self.epochs = int(train_config.get('epochs', 100))
+        self.learning_rate = float(train_config.get('learning_rate', 0.001))
+        self.weight_decay = float(train_config.get('weight_decay', 1e-5))
+        self.gradient_clip_norm = float(train_config.get('gradient_clip_norm', 1.0))
         
         # Gradient accumulation for large effective batch sizes
         self.gradient_accumulation_steps = train_config.get('gradient_accumulation_steps', 1)
@@ -137,13 +136,16 @@ class DataParallelTrainer:
                     device_id = int(os.environ['LOCAL_RANK'])
                     device = torch.device(f'cuda:{device_id}')
                 else:
-                    device = torch.device('cuda')
+                    device = torch.device('cuda:0')  
             else:
                 device = torch.device('cpu')
         else:
             device = torch.device(device)
         
         if device.type == 'cuda':
+            # Ensure we have a specific device index for set_device
+            if device.index is None:
+                device = torch.device(f'cuda:{device.index or 0}')
             torch.cuda.set_device(device)
         
         return device
@@ -234,9 +236,9 @@ class DataParallelTrainer:
             return optim.lr_scheduler.ReduceLROnPlateau(
                 self.optimizer,
                 mode=scheduler_params.get('mode', 'min'),
-                factor=scheduler_params.get('factor', 0.5),
-                patience=scheduler_params.get('patience', 5),
-                min_lr=scheduler_params.get('min_lr', 1e-7)
+                factor=float(scheduler_params.get('factor', 0.5)),
+                patience=int(scheduler_params.get('patience', 5)),
+                min_lr=float(scheduler_params.get('min_lr', 1e-7))
             )
         elif scheduler_name == 'cosine':
             return optim.lr_scheduler.CosineAnnealingLR(
@@ -246,8 +248,8 @@ class DataParallelTrainer:
         elif scheduler_name == 'step':
             return optim.lr_scheduler.StepLR(
                 self.optimizer,
-                step_size=train_config.get('step_size', 30),
-                gamma=train_config.get('gamma', 0.1)
+                step_size=int(train_config.get('step_size', 30)),
+                gamma=float(train_config.get('gamma', 0.1))
             )
         else:
             return None
@@ -300,8 +302,11 @@ class DataParallelTrainer:
         }
         
         self.optimizer.zero_grad()
-        
+        logger.info(f"ckpt: pre batch loop")
         for batch_idx, (inputs, targets) in enumerate(train_loader):
+            logger.info(f"ckpt: in batch loop")
+            logger.info(f"Loaded batch {batch_idx}")
+            
             # Move to device
             inputs = inputs.to(self.device, non_blocking=True)
             targets = {k: v.to(self.device, non_blocking=True) for k, v in targets.items()}
@@ -309,16 +314,22 @@ class DataParallelTrainer:
             # Forward pass with mixed precision
             if self.use_amp:
                 with autocast():
+                    #logger.info(f"ckpt: in autocast line1")
                     predictions = self.model(inputs)
-                    loss, loss_components = self.loss_fn(predictions, targets)
+                    #logger.info(f"ckpt: in autocast predictions")
+                    loss_dict = self.loss_fn(predictions, targets)
+                    #logger.info(f"ckpt: in autocast line3")
+                    loss = loss_dict['total_loss']
                     # Scale loss for gradient accumulation
                     loss = loss / self.gradient_accumulation_steps
-                
+                    #logger.info(f"ckpt: in autocast loss")
                 # Backward pass with gradient scaling
                 self.scaler.scale(loss).backward()
+                #logger.info(f"ckpt: in autocast gradient")
             else:
                 predictions = self.model(inputs)
-                loss, loss_components = self.loss_fn(predictions, targets)
+                loss_dict = self.loss_fn(predictions, targets)
+                loss = loss_dict['total_loss']
                 # Scale loss for gradient accumulation
                 loss = loss / self.gradient_accumulation_steps
                 loss.backward()
@@ -350,9 +361,13 @@ class DataParallelTrainer:
             
             # Collect metrics
             epoch_losses.append(loss.item() * self.gradient_accumulation_steps)
-            for key, value in loss_components.items():
+            for key, value in loss_dict.items():
                 if key in epoch_metrics:
-                    epoch_metrics[key].append(value.item())
+                    # Handle both tensor and scalar values
+                    if hasattr(value, 'item'):
+                        epoch_metrics[key].append(value.item())
+                    else:
+                        epoch_metrics[key].append(float(value))
             
             # Count active samples
             active_count = targets['is_active'].sum().item()
@@ -361,8 +376,9 @@ class DataParallelTrainer:
             # Log progress
             if self.is_main_process and batch_idx % 50 == 0:
                 current_lr = self.optimizer.param_groups[0]['lr']
-                logger.info(
-                    f"Epoch {self.epoch+1}, Batch {batch_idx}/{len(train_loader)}, "
+                # Use batch_idx + 1 to show current batch number (1-indexed)
+                print(
+                    f"Epoch {self.epoch+1}, Batch {batch_idx + 1}, "
                     f"Loss: {loss.item():.6f}, LR: {current_lr:.2e}"
                 )
         
@@ -405,16 +421,20 @@ class DataParallelTrainer:
                 if self.use_amp:
                     with autocast():
                         predictions = self.model(inputs)
-                        loss, loss_components = self.loss_fn(predictions, targets)
+                        loss_dict = self.loss_fn(predictions, targets)
                 else:
                     predictions = self.model(inputs)
-                    loss, loss_components = self.loss_fn(predictions, targets)
+                    loss_dict = self.loss_fn(predictions, targets)
                 
                 # Collect metrics
-                val_losses.append(loss.item())
-                for key, value in loss_components.items():
+                val_losses.append(loss_dict['total_loss'].item())
+                for key, value in loss_dict.items():
                     if key in val_metrics:
-                        val_metrics[key].append(value.item())
+                        # Handle both tensor and scalar values
+                        if hasattr(value, 'item'):
+                            val_metrics[key].append(value.item())
+                        else:
+                            val_metrics[key].append(float(value))
                 
                 active_count = targets['is_active'].sum().item()
                 val_metrics['active_samples'].append(active_count)
@@ -440,13 +460,13 @@ class DataParallelTrainer:
         """Save model checkpoint (only on main process)."""
         if not self.is_main_process:
             return
-        
+        import os
+        from datetime import datetime
         # Get model state dict (unwrap from DDP/DP if needed)
         if isinstance(self.model, (DDP, DP)):
             model_state_dict = self.model.module.state_dict()
         else:
             model_state_dict = self.model.state_dict()
-        
         checkpoint = {
             'epoch': self.epoch,
             'model_state_dict': model_state_dict,
@@ -457,16 +477,20 @@ class DataParallelTrainer:
             'metrics': metrics,
             'config': self.config
         }
-        
+        # Unique run directory: use SLURM_JOB_ID if available, else timestamp
+        job_id = os.environ.get('SLURM_JOB_ID')
+        if job_id is None:
+            job_id = datetime.now().strftime('%Y%m%d_%H%M%S')
+        run_dir = self.output_dir / f"run_{job_id}"
+        run_dir.mkdir(parents=True, exist_ok=True)
         # Save latest checkpoint
-        checkpoint_path = self.output_dir / 'latest_checkpoint.pth'
+        checkpoint_path = run_dir / 'latest_checkpoint.pth'
         torch.save(checkpoint, checkpoint_path)
-        
         # Save best checkpoint
         if is_best:
-            best_path = self.output_dir / 'best_checkpoint.pth'
+            best_path = run_dir / 'best_checkpoint.pth'
             torch.save(checkpoint, best_path)
-            logger.info(f"Saved best checkpoint with val_loss: {metrics['val_loss']:.6f}")
+            logger.info(f"Saved best checkpoint with val_loss: {metrics['val_loss']:.6f} in {run_dir}")
     
     def train(
         self, 
@@ -488,10 +512,8 @@ class DataParallelTrainer:
             # Set epoch for distributed sampler (if used)
             if hasattr(train_loader.sampler, 'set_epoch'):
                 train_loader.sampler.set_epoch(epoch)
-            
             # Training phase
             train_metrics = self.train_epoch(train_loader)
-            
             # Validation phase
             val_metrics = self.validate_epoch(val_loader)
             

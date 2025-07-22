@@ -91,7 +91,7 @@ evaluation:
     mass_conservation: 0.000001     
     
   # Regime analysis
-  active_threshold: 0.00000001  
+  active_threshold: 1e-12  
 
 # Experiment Configuration
 experiment:

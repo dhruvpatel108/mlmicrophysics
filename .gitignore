@@ -114,3 +114,7 @@ config/200607/
 
 # docs folder
 docs/
+
+# png and pdf files
+*.png
+*.pdf

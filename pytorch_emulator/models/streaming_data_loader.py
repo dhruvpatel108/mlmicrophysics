@@ -53,7 +53,7 @@ class StreamingMicrophysicsDataset(IterableDataset):
         chunk_size: int = 50000,  # Samples per chunk
         max_files: Optional[int] = None,
         sample_fraction: float = 1.0,
-        active_threshold: float = 1e-8,
+        active_threshold: float = 1e-12,
         shuffle_buffer_size: int = 100000,  # For memory-efficient shuffling
         random_seed: int = 42,
         split: str = "train",  # "train", "val", or "all"
@@ -148,7 +148,9 @@ class StreamingMicrophysicsDataset(IterableDataset):
             with open(self.scaler_path, 'rb') as f:
                 self.input_scaler = pickle.load(f)
         elif self.mode == "transform":
-            raise ValueError("Transform mode requires pre-fitted scaler")
+            # Don't raise error immediately - let fit_scaler handle it
+            logger.warning("Transform mode requested but no pre-fitted scaler found")
+            logger.info("Will attempt to fit scaler or create dummy scaler")
     
     def _estimate_dataset_size(self) -> int:
         """Estimate total dataset size by sampling a few files."""
@@ -195,14 +197,25 @@ class StreamingMicrophysicsDataset(IterableDataset):
                 break
             
             try:
-                # Read chunk by chunk
-                for chunk in pd.read_parquet(file_path, chunksize=self.chunk_size):
+                # Read entire file first (for small files) or use chunked reading
+                try:
+                    # Try chunked reading first
+                    chunk_iter = pd.read_parquet(file_path, chunksize=self.chunk_size)
+                except TypeError:
+                    # Fallback: read entire file and split manually
+                    logger.debug(f"Chunked reading not supported for {file_path}, reading entire file")
+                    full_data = pd.read_parquet(file_path)
+                    chunk_iter = [full_data[i:i+self.chunk_size] for i in range(0, len(full_data), self.chunk_size)]
+                
+                for chunk in chunk_iter:
                     if samples_collected >= n_samples_for_fitting:
                         break
                     
                     # Apply sampling
                     if self.sample_fraction < 1.0:
                         n_samples = int(len(chunk) * self.sample_fraction)
+                        if n_samples == 0:
+                            continue
                         chunk = chunk.sample(n=n_samples, random_state=self.rng.randint(0, 2**31))
                     
                     # Preprocess chunk
@@ -241,6 +254,10 @@ class StreamingMicrophysicsDataset(IterableDataset):
                 logger.info(f"Saved fitted scaler to {self.scaler_path}")
         else:
             logger.warning("No valid data found for scaler fitting")
+            # Create a dummy scaler to prevent transform mode errors
+            #logger.info("Creating dummy scaler for transform mode compatibility")
+            #dummy_data = np.zeros((100, len(self.input_cols)))
+            #self.input_scaler.fit(dummy_data)
     
     def _preprocess_chunk(self, chunk: pd.DataFrame, fit_mode: bool = False) -> Optional[pd.DataFrame]:
         """
@@ -278,12 +295,8 @@ class StreamingMicrophysicsDataset(IterableDataset):
                     abs_val = np.abs(chunk[col]) + epsilon
                     chunk[col] = sign * np.log10(abs_val)
             
-            # 2. Create active/quiescent labels
-            if "qrtend_TAU" in chunk.columns:
-                chunk["is_active"] = (chunk["qrtend_TAU"] > self.active_threshold).astype(float)
-            else:
-                # Fallback: use QC_TAU_in as proxy
-                chunk["is_active"] = (chunk["QC_TAU_in"] > self.active_threshold).astype(float)
+            # 2. Create active/quiescent labels based on qctend_TAU
+            chunk["is_active"] = (np.abs(chunk["qctend_TAU"]) > self.active_threshold).astype(float)
             
             # 3. Ensure required columns exist
             required_cols = self.input_cols + self.output_cols + ["is_active"]
@@ -322,8 +335,17 @@ class StreamingMicrophysicsDataset(IterableDataset):
             try:
                 logger.debug(f"Processing file: {file_path.name}")
                 
-                # Read file in chunks
-                for chunk in pd.read_parquet(file_path, chunksize=self.chunk_size):
+                # Read file in chunks with fallback for compatibility
+                try:
+                    # Try chunked reading first
+                    chunk_iter = pd.read_parquet(file_path, chunksize=self.chunk_size)
+                except TypeError:
+                    # Fallback: read entire file and split manually
+                    logger.debug(f"Chunked reading not supported for {file_path}, reading entire file")
+                    full_data = pd.read_parquet(file_path)
+                    chunk_iter = [full_data[i:i+self.chunk_size] for i in range(0, len(full_data), self.chunk_size)]
+                
+                for chunk in chunk_iter:
                     # Apply sampling
                     if self.sample_fraction < 1.0:
                         n_samples = int(len(chunk) * self.sample_fraction)

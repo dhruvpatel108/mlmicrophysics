@@ -128,25 +128,32 @@ class ConstraintAwareTrainer:
         
         if scheduler_name == 'reduce_lr_on_plateau':
             scheduler_params = train_config.get('scheduler_params', {})
-            return optim.lr_scheduler.ReduceLROnPlateau(
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
                 self.optimizer,
                 mode=scheduler_params.get('mode', 'min'),
                 factor=scheduler_params.get('factor', 0.5),
                 patience=scheduler_params.get('patience', 5),
                 min_lr=scheduler_params.get('min_lr', 1e-7)
             )
+            logger.info(f"Setup ReduceLROnPlateau scheduler: factor={scheduler_params.get('factor', 0.5)}, patience={scheduler_params.get('patience', 5)}")
+            return scheduler
         elif scheduler_name == 'cosine':
-            return optim.lr_scheduler.CosineAnnealingLR(
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(
                 self.optimizer,
                 T_max=self.epochs
             )
+            logger.info(f"Setup CosineAnnealingLR scheduler: T_max={self.epochs}")
+            return scheduler
         elif scheduler_name == 'step':
-            return optim.lr_scheduler.StepLR(
+            scheduler = optim.lr_scheduler.StepLR(
                 self.optimizer,
                 step_size=train_config.get('step_size', 30),
                 gamma=train_config.get('gamma', 0.1)
             )
+            logger.info(f"Setup StepLR scheduler: step_size={train_config.get('step_size', 30)}, gamma={train_config.get('gamma', 0.1)}")
+            return scheduler
         else:
+            logger.info(f"No scheduler configured (scheduler_name: {scheduler_name})")
             return None
     
     def setup_logging(self, config: Dict):
@@ -340,6 +347,7 @@ class ConstraintAwareTrainer:
             if self.scheduler:
                 if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
                     self.scheduler.step(val_metrics['val_loss'])
+                    logger.info(f"ReduceLROnPlateau scheduler triggered. New LR: {self.optimizer.param_groups[0]['lr']:.2e}")
                 else:
                     self.scheduler.step()
             

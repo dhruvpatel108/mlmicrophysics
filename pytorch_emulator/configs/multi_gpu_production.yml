@@ -1,0 +1,132 @@
+# PRODUCTION Configuration for Streaming + Parallel Training
+# Designed for large-scale multi-GPU training on full dataset
+
+experiment:
+  name: "multi_gpu_production"
+  version: "v2.0-prod"
+  description: "Production run: 100 parquet files, no subsampling, 1000 epochs, multi-GPU"
+  framework: "pytorch"
+
+data:
+  data_path: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/e3sm/processed_data/"
+  out_path: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/pytorch_multi_gpu_outputs/"
+  scaler_cache_dir: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/scaler_cache_test/"
+  input_cols:
+    - "QC_TAU_in"
+    - "QR_TAU_in"
+    - "NC_TAU_in"
+    - "NR_TAU_in"
+    - "PGAM"
+    - "LAMC"
+    - "LAMR"
+    - "N0R"
+    - "RHO_CLUBB"
+    - "CLOUD"
+    - "FREQR"
+  output_cols:
+    - "qctend_TAU"
+    - "nctend_TAU"
+    - "nrtend_TAU"
+    - "qrtend_TAU"
+  chunk_size: 10000
+  max_files: 100
+  subsample: 0.8
+  train_fraction: 0.8
+  batch_size: 10000000
+  num_workers: 0
+  scaler_fit_samples: 10000
+  active_threshold: 1e-12
+  random_seed: 42
+
+model:
+  input_dim: 11
+  shared_dims: [64, 64, 64]
+  head_dim: 32
+  dropout: 0.1
+  activation: "relu"
+  constraint_enforcement: true
+  mass_conservation: true
+  alpha: 0.3
+  huber_delta: 1.0
+  conservation_weight: 0.1
+  use_masking: true
+
+training:
+  epochs: 50
+  learning_rate: 0.001
+  weight_decay: 1e-5
+  gradient_accumulation_steps: 1
+  use_amp: true
+  optimizer: "adam"
+  scheduler: "reduce_lr_on_plateau"
+  scheduler_params:
+    mode: "min"
+    factor: 0.5
+    patience: 50
+    min_lr: 1e-7
+  gradient_clip_norm: 1.0
+  early_stopping_patience: 100
+  device: "auto"
+
+logging:
+  log_level: "INFO"
+  save_checkpoints: true
+  checkpoint_frequency: 10
+  wandb:
+    project: null
+    entity: null
+    group: null
+    job_type: null
+    tags: null
+
+hardware:
+  single_node:
+    gpus: 4
+    memory_per_gpu: "40GB"
+  distributed:
+    nodes: 1
+    gpus_per_node: 4
+    total_gpus: 4
+    cpus_per_gpu: 4
+    memory_per_node: "64GB"
+
+performance:
+  target_throughput:
+    single_gpu: 15000
+
+evaluation:
+  eval_frequency: 1
+  compute_physics_metrics: true
+  compute_regime_metrics: true
+  constraint_tolerance:
+    qrtend_min: 0.0
+    nctend_max: 0.0
+    mass_conservation: 1e-6
+  active_threshold: 1e-12
+
+advanced:
+  pin_memory: false
+  persistent_workers: false
+  use_deterministic: false
+  benchmark_mode: true
+  save_top_k: 5
+  save_last: true
+  auto_resume: false
+  checkpoint_every_n_steps: 1000
+
+data_pipeline:
+  prefetch_factor: 1
+  shuffle_buffer_size: 5000
+  use_memory_mapping: false
+  compression: "snappy"
+  vectorized_preprocessing: true
+  cache_preprocessed: false
+
+tracking:
+  primary_metric: "val_loss"
+  secondary_metrics:
+    - "train_loss"
+    - "conservation_loss"
+  track_throughput: true
+  track_memory_usage: false
+  track_gpu_utilization: false 

@@ -1,0 +1,217 @@
+# MINIMAL TEST Configuration for Streaming + Parallel Training
+# Designed for quick validation and testing - smallest possible job
+
+experiment:
+  name: "streaming_parallel_test"
+  version: "v2.0-test"
+  description: "Minimal test run for streaming + parallel pipeline validation"
+  framework: "pytorch"
+
+# Data Configuration - Minimal Test Setup
+data:
+  # Data paths (NERSC-specific)
+  data_path: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/e3sm/processed_data/"
+  out_path: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/pytorch_test_outputs/"
+  scaler_cache_dir: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/scaler_cache_test/"
+  
+  # Input/Output columns (same as production)
+  input_cols: 
+    - "QC_TAU_in"              # Cloud water mixing ratio
+    - "QR_TAU_in"              # Rain water mixing ratio  
+    - "NC_TAU_in"              # Cloud droplet number concentration
+    - "NR_TAU_in"              # Rain droplet number concentration
+    - "PGAM"                   # Gamma distribution shape parameter
+    - "LAMC"                   # Cloud droplet size distribution parameter
+    - "LAMR"                   # Rain droplet size distribution parameter
+    - "N0R"                    # Rain droplet intercept parameter
+    - "RHO_CLUBB"              # Air density from CLUBB
+    - "CLOUD"                  # Cloud fraction
+    - "FREQR"                  # Rain frequency
+    
+  output_cols: 
+    - "qctend_TAU"             # Cloud water tendency
+    - "nctend_TAU"             # Cloud droplet number tendency
+    - "nrtend_TAU"             # Rain droplet number tendency
+    - "qrtend_TAU"             # Rain water tendency
+  
+  # MINIMAL streaming data loading parameters
+  chunk_size: 5000             # Very small chunks for fast processing
+  max_files: 3                 # Use only 3 files (minimal dataset)
+  subsample: 0.001              # Use only 5% of data (ultra-small subset)
+  train_fraction: 0.8          # 80% for training, 20% for validation
+  
+  # Data loader parameters  
+  batch_size: 2048             # Small batch size for fast iteration
+  num_workers: 2               # Minimal workers
+  
+  # Scaler fitting parameters
+  scaler_fit_samples: 10000    # Very small sample for scaler fitting
+  
+  # Data preprocessing
+  active_threshold: 1e-12       # Threshold for active/quiescent classification
+  random_seed: 42
+
+# Model Configuration - Smaller Network for Fast Testing
+model:
+  # Architecture - Much smaller for speed
+  input_dim: 11                # Length of input_cols
+  shared_dims: [128, 128, 128, 64, 32]        # Much smaller network for fast training
+  head_dim: 16                 # Smaller head dimension
+  dropout: 0.1                 # Standard dropout
+  activation: "relu"
+  
+  # Physical constraints
+  constraint_enforcement: true
+  mass_conservation: true      # qc_tend = -qr_tend
+  
+  # Loss function configuration
+  alpha: 0.3                   # Weight for classification vs regression loss
+  huber_delta: 1.0             # Huber loss parameter for robustness
+  conservation_weight: 0.1     # Weight for mass conservation loss
+  use_masking: true            # Only compute regression loss on active samples
+
+# Training Configuration - Minimal for Fast Testing
+training:
+  # Training parameters - MINIMAL
+  epochs: 3                    # Only 3 epochs for quick test
+  learning_rate: 0.001         # Standard learning rate
+  weight_decay: 1e-5           # L2 regularization
+  
+  # Multi-GPU and distributed training
+  gradient_accumulation_steps: 1  # No accumulation for simplicity
+  use_amp: true                # Keep mixed precision for testing
+  
+  # Optimization
+  optimizer: "adam"            # Simple Adam optimizer
+  scheduler: "reduce_lr_on_plateau"  # Simple scheduler
+  scheduler_params:
+    mode: "min"
+    factor: 0.5
+    patience: 2
+    min_lr: 1e-7
+  
+  # Regularization and stability
+  gradient_clip_norm: 1.0      # Gradient clipping for stability
+  early_stopping_patience: 5  # Short patience for quick exit
+  
+  # Device configuration
+  device: "auto"               # Auto-detect GPU/CPU
+
+# Logging Configuration - Minimal
+logging:
+  log_level: "INFO"
+  save_checkpoints: true
+  checkpoint_frequency: 1      # Save checkpoint every epoch
+  
+  # No W&B for testing
+  wandb:
+    project: null              # Disable W&B for quick test
+    entity: null
+    group: null
+    job_type: null
+    tags: null
+
+# Hardware Configuration - Single GPU Test
+hardware:
+  # Single GPU test
+  single_node:
+    gpus: 1                    # Single GPU for simplicity
+    memory_per_gpu: "40GB"     # A100 GPU memory
+    
+  # Distributed test (if needed)
+  distributed:
+    nodes: 1                   # Single node
+    gpus_per_node: 1           # Single GPU
+    total_gpus: 1              # Total 1 GPU
+    cpus_per_gpu: 4            # Fewer CPUs
+    memory_per_node: "64GB"    # Less memory needed
+
+# Performance Expectations - Test Scale
+performance:
+  # Expected throughput (samples/second) - much higher due to small model
+  target_throughput:
+    single_gpu: 15000          # Higher throughput with small model
+
+  
+
+
+# Evaluation Configuration - Minimal
+evaluation:
+  # Evaluation frequency
+  eval_frequency: 1            # Evaluate every epoch
+  
+  # Metrics to compute
+  compute_physics_metrics: true
+  compute_regime_metrics: true
+  
+  # Physics constraint validation
+  constraint_tolerance:
+    qrtend_min: 0.0            # qrtend must be >= 0
+    nctend_max: 0.0            # nctend must be <= 0  
+    mass_conservation: 1e-6    # Mass conservation tolerance
+    
+  # Regime analysis
+  active_threshold: 1e-12       # Same as data preprocessing
+
+# Advanced Configuration - Minimal
+advanced:
+  # Memory optimization
+  pin_memory: false            # Disable for simplicity
+  persistent_workers: false    # Disable for simplicity
+  
+  # Numerical stability
+  use_deterministic: false     # Speed over reproducibility
+  benchmark_mode: true         # Enable cudnn benchmarking for speed
+  
+  # Checkpointing strategy
+  save_top_k: 1               # Keep only best checkpoint
+  save_last: true             # Save last checkpoint
+  
+  # Recovery and fault tolerance
+  auto_resume: false          # Disable for testing
+  checkpoint_every_n_steps: 1000  # Frequent checkpointing
+
+# Data Pipeline Optimization - Simple
+data_pipeline:
+  # Streaming optimizations
+  prefetch_factor: 1          # Minimal prefetching
+  shuffle_buffer_size: 5000   # Small shuffle buffer
+  
+  # I/O optimizations  
+  use_memory_mapping: false   # Disable for simplicity
+  compression: "snappy"       # Standard compression
+  
+  # Preprocessing optimizations
+  vectorized_preprocessing: true  # Keep vectorization
+  cache_preprocessed: false   # No caching for test
+
+# Experiment Tracking - Minimal
+tracking:
+  # Metrics to track
+  primary_metric: "val_loss"
+  secondary_metrics:
+    - "train_loss"
+    - "conservation_loss"
+  
+  # Performance tracking
+  track_throughput: true
+  track_memory_usage: false   # Disable for simplicity
+  track_gpu_utilization: false # Disable for simplicity
+  
+  # Model versioning
+  model_registry: "test_models"
+  version_format: "test_v{epoch:03d}_{val_loss:.6f}"
+
+# Resource Limits and Quotas - Minimal
+resources:
+  # Time limits
+  max_training_time: "0:30:00"  # 10 minute limit for test
+  checkpoint_time_buffer: "1:00" # 1 minute buffer
+  
+  # Memory limits (per process)
+  max_memory_usage: "10GB"     # Much lower memory limit
+  oom_detection: true          # Keep OOM detection
+  
+  # Storage limits
+  max_checkpoint_size: "1GB"   # Smaller checkpoint limit
+  cleanup_old_checkpoints: true # Clean up for testing 
