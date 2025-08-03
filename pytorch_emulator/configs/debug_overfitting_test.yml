@@ -1,0 +1,124 @@
+# DEBUG Configuration for Overfitting Test with Detailed Loss Monitoring
+# Small dataset (50 files) to test if model can overfit and learn
+
+experiment:
+  name: "debug_overfitting_test"
+  version: "v1.0-overfit"
+  description: "Debug: test overfitting on 50 files with detailed loss monitoring"
+  framework: "pytorch"
+
+data:
+  loader_type: "optimized"  # Use optimized streaming data loader
+  data_path: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/e3sm/processed_data/"
+  out_path: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/pytorch_multi_gpu_outputs/"
+  scaler_cache_dir: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/scaler_cache_debug/"
+  input_cols:
+    - "QC_TAU_in"
+    - "QR_TAU_in"
+    - "NC_TAU_in"
+    - "NR_TAU_in"
+    - "PGAM"
+    - "LAMC"
+    - "LAMR"
+    - "N0R"
+    - "RHO_CLUBB"
+    - "CLOUD"
+    - "FREQR"
+  output_cols:
+    - "qctend_TAU"
+    - "nctend_TAU"
+    - "nrtend_TAU"
+    - "qrtend_TAU"
+  chunk_size: 50000
+  max_files: 50          # Small dataset for quick overfitting test
+  subsample: 0.25        # Use 25% of data from these files
+  train_fraction: 0.8    # 80% train, 20% val
+  batch_size: 32768       # Large batch size for overfitting
+  num_workers: 0         # Keep at 0 for stability
+  scaler_fit_samples: 100000
+  active_threshold: 1.0e-12
+  random_seed: 42
+
+model:
+  input_dim: 11
+  shared_dims: [256, 256, 128, 128, 64]
+  head_dim: 64
+  dropout: 0.0           # No dropout for overfitting test
+  activation: "relu"
+  constraint_enforcement: true
+  mass_conservation: true
+  alpha: 0.5
+  huber_delta: 1.0
+  conservation_weight: 0.1
+  use_masking: true
+
+training:
+  epochs: 20             # More epochs to see overfitting
+  learning_rate: 0.001
+  weight_decay: 0.0      # No regularization for overfitting test
+  gradient_accumulation_steps: 1
+  use_amp: true
+  optimizer: "adam"
+  scheduler: "reduce_lr_on_plateau"
+  scheduler_params:
+    mode: "min"
+    factor: 0.5
+    patience: 10
+    min_lr: 1.0e-7
+  gradient_clip_norm: 1.0
+  early_stopping_patience: 50  # High patience to allow overfitting
+  device: "auto"
+  validation_frequency: 1
+  checkpoint_frequency: 2
+
+loss:
+  classification_weight: 1.0
+  regression_weight: 1.0
+  conservation_weight: 0.1
+  huber_delta: 1.0
+
+logging:
+  log_level: "INFO"
+  save_checkpoints: true
+  checkpoint_frequency: 2
+  log_frequency: 10
+  wandb:
+    project: null
+    entity: null
+    group: null
+    job_type: null
+    tags: null
+
+hardware:
+  device: "auto"
+  num_workers: 0
+  pin_memory: true
+  single_node:
+    gpus: 1              # Single GPU for debug
+    memory_per_gpu: "20GB"
+  distributed:
+    nodes: 1
+    gpus_per_node: 1
+    total_gpus: 1
+    cpus_per_gpu: 4
+    memory_per_node: "32GB"
+
+evaluation:
+  eval_frequency: 1
+  compute_physics_metrics: true
+  compute_regime_metrics: true
+  constraint_tolerance:
+    qrtend_min: 0.0
+    nctend_max: 0.0
+    mass_conservation: 1.0e-6
+  active_threshold: 1.0e-12
+
+advanced:
+  pin_memory: true
+  persistent_workers: false
+  use_deterministic: false
+  benchmark_mode: true
+  save_top_k: 3
+  save_last: true
+  auto_resume: false
+  checkpoint_every_n_steps: 500

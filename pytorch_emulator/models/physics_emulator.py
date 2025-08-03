@@ -54,18 +54,22 @@ class ConstraintAwareEmulator(nn.Module):
             nn.Linear(shared_dims[-1], head_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(head_dim, 1)
+            nn.Linear(head_dim, int(head_dim/2)),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(int(head_dim/2), 1)
             # Removed: nn.Sigmoid() - BCEWithLogitsLoss handles sigmoid internally
         )
         
         # Regression heads with constraint activations
         # qrtend: Must be ≥ 0 (rain formation is always positive)
+        # For log-transformed data we don't need to apply ReLU to ensure ≥ 0
         self.qrtend_head = nn.Sequential(
             nn.Linear(shared_dims[-1], head_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(head_dim, 1),
-            nn.ReLU()  # Ensures ≥ 0
+            #nn.ReLU()  # Ensures ≥ 0
         )
         
         # nctend: Must be ≤ 0 (cloud droplet loss)
@@ -107,8 +111,8 @@ class ConstraintAwareEmulator(nn.Module):
         Returns:
             Dictionary containing:
             - 'is_active': Classification probabilities [batch_size, 1]
-            - 'qrtend': Rain tendency (≥0) [batch_size, 1]  
-            - 'nctend': Cloud droplet number tendency (≤0) [batch_size, 1]
+            - 'qrtend': Rain tendency  [batch_size, 1]  
+            - 'nctend': Cloud droplet number tendency  [batch_size, 1]
             - 'nrtend': Rain number tendency [batch_size, 1]
             - 'qctend': Cloud water tendency (derived) [batch_size, 1]
         """
@@ -120,11 +124,13 @@ class ConstraintAwareEmulator(nn.Module):
         is_active = torch.sigmoid(is_active_logits)  # Apply sigmoid for final output
         
         # Regression heads with physical constraints
-        qrtend = self.qrtend_head(shared_features)  # Already ≥0 from ReLU
+        qrtend = self.qrtend_head(shared_features)  # For log-transformed data we don't need to apply ReLU to ensure ≥ 0
         
         # For nctend: Apply -ReLU to ensure ≤0
-        nctend_positive = self.nctend_head(shared_features)
-        nctend = -F.relu(nctend_positive)  # Ensures ≤0
+        # For log-transformed data we don't need to apply ReLU to ensure ≤ 0
+        #nctend_positive = self.nctend_head(shared_features)
+        #nctend = -F.relu(nctend_positive)  # Ensures ≤0
+        nctend = self.nctend_head(shared_features)
         
         nrtend = self.nrtend_head(shared_features)  # No constraints
         
