@@ -115,6 +115,9 @@ config/200607/
 # docs folder
 docs/
 
-# png and pdf files
+# png, pd, pkl, json files
 *.png
 *.pdf
+*.pkl
+*.json
+

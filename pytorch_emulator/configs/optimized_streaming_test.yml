@@ -1,0 +1,61 @@
+# Configuration for testing optimized streaming data loader
+data:
+  loader_type: "optimized"  # Use optimized streaming data loader
+  data_path: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/e3sm/processed_data/"
+  input_cols: 
+    - "QC_TAU_in"
+    - "QR_TAU_in" 
+    - "NC_TAU_in"
+    - "NR_TAU_in"
+    - "PGAM"
+    - "LAMC"
+    - "LAMR"
+    - "N0R"
+    - "RHO_CLUBB"
+    - "CLOUD"
+    - "FREQR"
+  output_cols:
+    - "qctend_TAU"
+    - "nctend_TAU"
+    - "nrtend_TAU"
+    - "qrtend_TAU"
+  train_fraction: 0.8
+  batch_size: 32768  # Smaller batch for testing
+  chunk_size: 50000
+  max_files: 500    
+  subsample: 0.5   
+  active_threshold: 1.0e-12  # Fixed: numeric not string
+  random_seed: 42
+  scaler_fit_samples: 50000
+
+model:
+  input_dim: 11
+  shared_dims: [256, 256, 256, 128, 64]  # Small model for fast testing
+  head_dim: 32
+  dropout: 0.1
+  activation: "relu"
+
+training:
+  epochs: 40  # Quick test
+  learning_rate: 0.001
+  weight_decay: 1.0e-5
+  early_stopping_patience: 50
+  gradient_clip_norm: 1.0
+  use_amp: true
+  validation_frequency: 1
+  checkpoint_frequency: 2
+
+loss:
+  classification_weight: 1.0
+  regression_weight: 1.0
+  conservation_weight: 0.1
+  huber_delta: 1.0
+
+hardware:
+  device: "auto"
+  num_workers: 0
+  pin_memory: true
+
+logging:
+  log_level: "INFO"
+  log_frequency: 10 

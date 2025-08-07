@@ -87,7 +87,7 @@ class StreamingMicrophysicsDataset(IterableDataset):
         self.chunk_size = chunk_size
         self.max_files = max_files
         self.sample_fraction = sample_fraction
-        self.active_threshold = active_threshold
+        self.active_threshold = float(active_threshold)  # Convert to float to avoid comparison issues
         self.shuffle_buffer_size = shuffle_buffer_size
         self.random_seed = random_seed
         self.split = split

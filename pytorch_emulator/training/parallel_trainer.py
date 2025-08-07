@@ -20,7 +20,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.parallel import DataParallel as DP
-from torch.cuda.amp import GradScaler, autocast
+from torch.cuda.amp import GradScaler#, autocast
 import os
 import time
 import json
@@ -302,30 +302,25 @@ class DataParallelTrainer:
         }
         
         self.optimizer.zero_grad()
-        logger.info(f"ckpt: pre batch loop")
+        #logger.info(f"ckpt: pre batch loop")
         for batch_idx, (inputs, targets) in enumerate(train_loader):
-            logger.info(f"ckpt: in batch loop")
-            logger.info(f"Loaded batch {batch_idx}")
-            
+            t_batch_start = time.time()
+            logger.info(f"Training batch_idx: {batch_idx}")
             # Move to device
             inputs = inputs.to(self.device, non_blocking=True)
             targets = {k: v.to(self.device, non_blocking=True) for k, v in targets.items()}
             
             # Forward pass with mixed precision
             if self.use_amp:
-                with autocast():
-                    #logger.info(f"ckpt: in autocast line1")
+                #with autocast():
+                with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
                     predictions = self.model(inputs)
-                    #logger.info(f"ckpt: in autocast predictions")
                     loss_dict = self.loss_fn(predictions, targets)
-                    #logger.info(f"ckpt: in autocast line3")
                     loss = loss_dict['total_loss']
                     # Scale loss for gradient accumulation
                     loss = loss / self.gradient_accumulation_steps
-                    #logger.info(f"ckpt: in autocast loss")
                 # Backward pass with gradient scaling
                 self.scaler.scale(loss).backward()
-                #logger.info(f"ckpt: in autocast gradient")
             else:
                 predictions = self.model(inputs)
                 loss_dict = self.loss_fn(predictions, targets)
@@ -376,12 +371,29 @@ class DataParallelTrainer:
             # Log progress
             if self.is_main_process and batch_idx % 50 == 0:
                 current_lr = self.optimizer.param_groups[0]['lr']
+                
+                # Detailed loss component logging
+                cls_loss = loss_dict.get('classification_loss', 0.0)
+                reg_loss = loss_dict.get('regression_loss', 0.0)
+                active_count = loss_dict.get('active_samples', 0)
+                total_samples = inputs.size(0)
+                active_fraction = active_count / total_samples if total_samples > 0 else 0.0
+                
+                # Convert to float if they're tensors
+                if hasattr(cls_loss, 'item'):
+                    cls_loss = cls_loss.item()
+                if hasattr(reg_loss, 'item'):
+                    reg_loss = reg_loss.item()
+                
                 # Use batch_idx + 1 to show current batch number (1-indexed)
                 print(
                     f"Epoch {self.epoch+1}, Batch {batch_idx + 1}, "
-                    f"Loss: {loss.item():.6f}, LR: {current_lr:.2e}"
+                    f"Loss: {loss.item():.6f}, LR: {current_lr:.2e}, "
+                    f"CLS: {cls_loss:.4f}, REG: {reg_loss:.4f}, "
+                    f"Active: {active_count}/{total_samples} ({active_fraction:.2%})"
                 )
-        
+            t_batch_end = time.time()
+            logger.info(f"Batch {batch_idx + 1} took {t_batch_end - t_batch_start:.2f} seconds")
         # Synchronize metrics across processes for distributed training
         if self.is_distributed:
             # Average losses across all processes
@@ -419,7 +431,8 @@ class DataParallelTrainer:
                 
                 # Forward pass
                 if self.use_amp:
-                    with autocast():
+                    #with autocast():
+                    with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
                         predictions = self.model(inputs)
                         loss_dict = self.loss_fn(predictions, targets)
                 else:
@@ -506,6 +519,7 @@ class DataParallelTrainer:
         start_time = time.time()
         
         for epoch in range(self.epochs):
+            logger.info(f"Epoch {epoch}...")
             self.epoch = epoch
             epoch_start_time = time.time()
             
@@ -544,9 +558,11 @@ class DataParallelTrainer:
             if self.is_main_process:
                 epoch_time = time.time() - epoch_start_time
                 logger.info(
-                    f"Epoch {epoch+1}/{self.epochs} - "
-                    f"Train Loss: {train_metrics['train_loss']:.6f}, "
-                    f"Val Loss: {val_metrics['val_loss']:.6f}, "
+                    f"Epoch {epoch+1}/{self.epochs} Summary: "
+                    f"Train Loss: {train_metrics['train_loss']:.6f} "
+                    f"(CLS: {train_metrics['classification_loss']:.4f}, REG: {train_metrics['regression_loss']:.4f}), "
+                    f"Val Loss: {val_metrics['val_loss']:.6f} "
+                    f"(CLS: {val_metrics['val_classification_loss']:.4f}, REG: {val_metrics['val_regression_loss']:.4f}), "
                     f"Time: {epoch_time:.2f}s"
                 )
                 

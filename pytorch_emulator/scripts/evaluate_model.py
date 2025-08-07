@@ -14,19 +14,25 @@ Usage:
 """
 
 import sys
-import os
 import argparse
 import yaml
 import torch
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from typing import Dict, Tuple, List
 import warnings
+import logging
 warnings.filterwarnings('ignore')
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Add model and training paths
 sys.path.append('models')
@@ -35,18 +41,19 @@ sys.path.append('training')
 # Import our components
 from physics_emulator import ConstraintAwareEmulator
 from losses import ConstraintAwareLoss, create_constraint_aware_loss
-from data_loader import create_data_loaders
+#from data_loader import create_data_loaders
+from streaming_data_loader_v2 import create_optimized_streaming_loaders
 from trainer import ConstraintAwareTrainer
 
 # Set style for beautiful plots
-plt.style.use('seaborn-v0_8')
-sns.set_palette("husl")
+#plt.style.use('seaborn-v0_8')
+#sns.set_palette("husl")
 
 
 def load_model_and_config(checkpoint_path: str, config_path: str):
     """Load trained model and configuration."""
-    print(f"📁 Loading checkpoint: {checkpoint_path}")
-    print(f"📋 Loading config: {config_path}")
+    logger.info(f"📁 Loading checkpoint: {checkpoint_path}")
+    logger.info(f"📋 Loading config: {config_path}")
     
     # Load config
     with open(config_path, 'r') as f:
@@ -68,8 +75,8 @@ def load_model_and_config(checkpoint_path: str, config_path: str):
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
-    print(f"✅ Model loaded from epoch {checkpoint['epoch']}")
-    print(f"   Parameters: {model.get_parameter_count():,}")
+    logger.info(f"✅ Model loaded from epoch {checkpoint['epoch']}")
+    logger.info(f"   Parameters: {model.get_parameter_count():,}")
     
     return model, config, checkpoint
 
@@ -88,15 +95,19 @@ def make_predictions(model, data_loader, device='cpu'):
     }
     all_targets = {
         'is_active': [],
-        'qctend_TAU': [],
+        'qrtend_TAU': [],
         'nctend_TAU': [],
-        'nrtend_TAU': []
+        'nrtend_TAU': [],
+        'qctend_TAU': []
     }
     
-    print("🔮 Making predictions...")
+    logger.info("🔮 Making predictions...")
     
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(data_loader):
+            if batch_idx > 1:
+                break
+            
             inputs = inputs.to(device)
             targets = {k: v.to(device) for k, v in targets.items()}
             
@@ -113,7 +124,7 @@ def make_predictions(model, data_loader, device='cpu'):
                     all_targets[key].append(targets[key].cpu().numpy())
             
             if batch_idx % 10 == 0:
-                print(f"  Processed {batch_idx}/{len(data_loader)} batches")
+                logger.info(f"  Processed {batch_idx}/{len(data_loader)} batches")
     
     # Concatenate all batches
     for key in all_predictions:
@@ -122,7 +133,7 @@ def make_predictions(model, data_loader, device='cpu'):
     for key in all_targets:
         all_targets[key] = np.concatenate(all_targets[key], axis=0).flatten()
     
-    print(f"✅ Predictions completed: {len(all_predictions['qrtend'])} samples")
+    logger.info(f"✅ Predictions completed: {len(all_predictions['qrtend'])} samples")
     
     return all_predictions, all_targets
 
@@ -147,14 +158,14 @@ def calculate_metrics(y_true, y_pred, name):
 
 def create_scatter_plots(predictions, targets, output_dir):
     """Create beautiful scatter plots with R² values."""
-    print("📊 Creating scatter plots...")
+    logger.info("📊 Creating scatter plots...")
     
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Define the variables to plot
     plot_vars = [
-        ('qrtend', 'qctend_TAU', 'Rain Tendency (qrtend)', 'log'),
+        ('qrtend', 'qrtend_TAU', 'Rain Tendency (qrtend)', 'log'),
         ('nctend', 'nctend_TAU', 'Cloud Number Tendency (nctend)', 'log'),
         ('nrtend', 'nrtend_TAU', 'Rain Number Tendency (nrtend)', 'log'),
         ('qctend', 'qctend_TAU', 'Cloud Water Tendency (qctend)', 'log')
@@ -169,15 +180,17 @@ def create_scatter_plots(predictions, targets, output_dir):
     
     for i, (pred_key, target_key, title, scale) in enumerate(plot_vars):
         ax = axes[i]
-        
-        if pred_key == 'qctend':
+        logger.info(f"Plotting {pred_key} vs {target_key}")
+        #if pred_key == 'qctend':
             # For qctend, we derive it from qrtend in the ground truth
-            y_true = -targets['qctend_TAU']  # qctend should equal -qrtend
-            y_pred = predictions['qctend']
-        else:
-            y_true = targets[target_key]
-            y_pred = predictions[pred_key]
-        
+        #    y_true = -targets['qctend_TAU']  # qctend should equal -qrtend
+        #    y_pred = predictions['qctend']
+        #else:
+        #    y_true = targets[target_key]
+        #    y_pred = predictions[pred_key]
+        y_true = targets[target_key]
+        y_pred = predictions[pred_key]
+
         # Calculate metrics
         metrics = calculate_metrics(y_true, y_pred, pred_key)
         metrics_list.append(metrics)
@@ -231,17 +244,19 @@ def create_scatter_plots(predictions, targets, output_dir):
                    transform=ax.transAxes, verticalalignment='top',
                    bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.7))
     
+    logger.info(f" before tight layout")
     plt.tight_layout()
-    plt.savefig(output_dir / 'scatter_plots.png', dpi=300, bbox_inches='tight')
-    plt.savefig(output_dir / 'scatter_plots.pdf', bbox_inches='tight')
-    print(f"✅ Scatter plots saved to {output_dir}")
+    logger.info(f" after tight layout")
+    plt.savefig(output_dir / 'scatter_plots.png', bbox_inches='tight')
+    #plt.savefig(output_dir / 'scatter_plots.pdf', bbox_inches='tight')
+    logger.info(f"✅ Scatter plots saved to {output_dir}")
     
     return metrics_list
 
 
 def create_constraint_validation_plot(predictions, output_dir):
     """Create constraint validation visualization."""
-    print("🔒 Creating constraint validation plots...")
+    logger.info("🔒 Creating constraint validation plots...")
     
     output_dir = Path(output_dir)
     
@@ -300,12 +315,12 @@ def create_constraint_validation_plot(predictions, output_dir):
     plt.tight_layout()
     plt.savefig(output_dir / 'constraint_validation.png', dpi=300, bbox_inches='tight')
     plt.savefig(output_dir / 'constraint_validation.pdf', bbox_inches='tight')
-    print(f"✅ Constraint validation plots saved to {output_dir}")
+    logger.info(f"✅ Constraint validation plots saved to {output_dir}")
 
 
 def create_training_curves(checkpoint, output_dir):
     """Create training curves if available."""
-    print("📈 Creating training curves...")
+    logger.info("📈 Creating training curves...")
     
     output_dir = Path(output_dir)
     
@@ -328,26 +343,26 @@ def create_training_curves(checkpoint, output_dir):
         plt.tight_layout()
         plt.savefig(output_dir / 'training_curves.png', dpi=300, bbox_inches='tight')
         plt.savefig(output_dir / 'training_curves.pdf', bbox_inches='tight')
-        print(f"✅ Training curves saved to {output_dir}")
+        logger.info(f"✅ Training curves saved to {output_dir}")
     else:
-        print("⚠️ No training history found in checkpoint")
+        logger.info("⚠️ No training history found in checkpoint")
 
 
 def print_metrics_summary(metrics_list):
-    """Print a beautiful metrics summary."""
-    print("\n" + "="*70)
-    print("📊 EVALUATION METRICS SUMMARY")
-    print("="*70)
+    """print a beautiful metrics summary."""
+    logger.info("\n" + "="*70)
+    logger.info("📊 EVALUATION METRICS SUMMARY")
+    logger.info("="*70)
     
     for metrics in metrics_list:
-        print(f"\n🎯 {metrics['name'].upper()}")
-        print(f"   R² Score:     {metrics['r2']:.4f}")
-        print(f"   RMSE:         {metrics['rmse']:.2e}")
-        print(f"   MAE:          {metrics['mae']:.2e}")
-        print(f"   Mean (True):  {metrics['mean_true']:.2e}")
-        print(f"   Mean (Pred):  {metrics['mean_pred']:.2e}")
+        logger.info(f"\n🎯 {metrics['name'].upper()}")
+        logger.info(f"   R² Score:     {metrics['r2']:.4f}")
+        logger.info(f"   RMSE:         {metrics['rmse']:.2e}")
+        logger.info(f"   MAE:          {metrics['mae']:.2e}")
+        logger.info(f"   Mean (True):  {metrics['mean_true']:.2e}")
+        logger.info(f"   Mean (Pred):  {metrics['mean_pred']:.2e}")
     
-    print("\n" + "="*70)
+    logger.info("\n" + "="*70)
 
 
 def main():
@@ -387,28 +402,32 @@ def main():
     else:
         device = args.device
     
-    print("🔍 Starting Model Evaluation")
-    print("="*50)
-    print(f"📁 Checkpoint: {args.checkpoint}")
-    print(f"📋 Config: {args.config}")
-    print(f"💾 Output: {args.output_dir}")
-    print(f"🖥️  Device: {device}")
-    print("="*50)
+    logger.info("🔍 Starting Model Evaluation")
+    logger.info("="*50)
+    logger.info(f"📁 Checkpoint: {args.checkpoint}")
+    logger.info(f"📋 Config: {args.config}")
+    logger.info(f"💾 Output: {args.output_dir}")
+    logger.info(f"🖥️  Device: {device}")
+    logger.info("="*50)
     
     # Load model and config
     model, config, checkpoint = load_model_and_config(args.checkpoint, args.config)
     
-    # Setup data (use validation data for evaluation)
+    # Setup data (use validation data for evaluation)e
     data_config = config['data']
-    train_loader, val_loader, dataset = create_data_loaders(
+    train_loader, val_loader, dataset = create_optimized_streaming_loaders(
         data_path=data_config['data_path'],
         config=config,
         train_fraction=data_config['train_fraction'],
-        batch_size=data_config['batch_size']
+        batch_size=data_config['batch_size'],
+        scaler_cache_dir=data_config.get('scaler_cache_dir', './scaler_cache')
     )
     
-    print(f"📊 Evaluating on {len(val_loader)} validation batches...")
-    
+    logger.info(f"📊 Evaluating on {len(val_loader)} validation batches...")
+    logger.info(f"Size of the val_loader: {len(val_loader)} and the number of batches in the val_loader: {len(val_loader.dataset)}")
+
+
+
     # Make predictions
     predictions, targets = make_predictions(model, val_loader, device)
     
@@ -421,15 +440,15 @@ def main():
     create_constraint_validation_plot(predictions, output_dir)
     create_training_curves(checkpoint, output_dir)
     
-    # Print summary
+    # print summary
     print_metrics_summary(metrics_list)
     
-    print(f"\n🎉 Evaluation completed!")
-    print(f"📁 Results saved to: {output_dir.absolute()}")
-    print("✅ Check the following files:")
-    print(f"   - scatter_plots.png/pdf")
-    print(f"   - constraint_validation.png/pdf")
-    print(f"   - training_curves.png/pdf")
+    logger.info(f"\n🎉 Evaluation completed!")
+    logger.info(f"📁 Results saved to: {output_dir.absolute()}")
+    logger.info("✅ Check the following files:")
+    logger.info(f"   - scatter_plots.png/pdf")
+    logger.info(f"   - constraint_validation.png/pdf")
+    logger.info(f"   - training_curves.png/pdf")
 
 
 if __name__ == "__main__":

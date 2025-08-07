@@ -153,19 +153,50 @@ def main():
         logger.info("=" * 60)
     
     try:
-        # Setup data loaders with streaming
-        if is_main_process:
-            logger.info("📊 Setting up streaming data loaders...")
-        
+        # Setup data loaders with configurable type
         data_config = config['data']
-        train_loader, val_loader, scaler = create_streaming_data_loaders(
-            data_path=data_config['data_path'],
-            config=config,
-            train_fraction=data_config.get('train_fraction', 0.8),
-            batch_size=data_config.get('batch_size', 1024),
-            num_workers=data_config.get('num_workers', 0),
-            scaler_cache_dir=data_config.get('scaler_cache_dir', './scaler_cache')
-        )
+        loader_type = data_config.get('loader_type', 'streaming')  # Default to current streaming
+        
+        if is_main_process:
+            logger.info(f"📊 Setting up {loader_type} data loaders...")
+        
+        if loader_type == 'streaming' or loader_type == 'current':
+            # Use current streaming data loader
+            from models.streaming_data_loader import create_streaming_data_loaders
+            train_loader, val_loader, scaler = create_streaming_data_loaders(
+                data_path=data_config['data_path'],
+                config=config,
+                train_fraction=data_config.get('train_fraction', 0.8),
+                batch_size=data_config.get('batch_size', 1024),
+                num_workers=data_config.get('num_workers', 0),
+                scaler_cache_dir=data_config.get('scaler_cache_dir', './scaler_cache')
+            )
+        elif loader_type == 'dask':
+            # Use Dask-based data loader
+            from models.dask_data_loader import create_dask_data_loaders
+            train_loader, val_loader, scaler = create_dask_data_loaders(
+                data_path=data_config['data_path'],
+                config=config,
+                train_fraction=data_config.get('train_fraction', 0.8),
+                batch_size=data_config.get('batch_size', 1024),
+                num_workers=data_config.get('num_workers', 0),
+                scaler_cache_dir=data_config.get('scaler_cache_dir', './scaler_cache'),
+                n_dask_workers=data_config.get('n_dask_workers', 4)
+            )
+        elif loader_type == 'optimized' or loader_type == 'optimized_streaming':
+            # Use optimized streaming data loader
+            logger.info(f"Using {loader_type} streaming data loader")
+            from models.streaming_data_loader_v2 import create_optimized_streaming_loaders
+            train_loader, val_loader, scaler = create_optimized_streaming_loaders(
+                data_path=data_config['data_path'],
+                config=config,
+                train_fraction=data_config.get('train_fraction', 0.8),
+                batch_size=data_config.get('batch_size', 1024),
+                scaler_cache_dir=data_config.get('scaler_cache_dir', './scaler_cache')
+            )
+        else:
+            raise ValueError(f"Unknown loader_type '{loader_type}'. "
+                           f"Supported types: 'streaming', 'dask', 'optimized'")
         
         if is_main_process:
             logger.info("✅ Streaming data loaders created successfully")
@@ -176,8 +207,6 @@ def main():
             logger.info(f"   Batch size: {data_config.get('batch_size', 1024)}")
             logger.info(f"   Training batches: {len(train_loader)}")
             logger.info(f"   Validation batches: {len(val_loader)}")
-        # Setup model and loss
-        if is_main_process:
             logger.info("🧠 Setting up model and loss function...")
         
         model, loss_fn = setup_model_and_loss(config, device)
@@ -205,7 +234,7 @@ def main():
             if is_main_process:
                 logger.info(f"📂 Resuming from checkpoint: {args.resume}")
             
-            checkpoint = torch.load(args.resume, map_location=device)
+            checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
             
             # Load model state (handle DDP/DP wrapper)
             if hasattr(trainer.model, 'module'):

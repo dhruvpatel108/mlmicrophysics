@@ -35,20 +35,20 @@ data:
     - "qrtend_TAU"             # Rain water tendency
   
   # MINIMAL streaming data loading parameters
-  chunk_size: 10000             # Very small chunks for fast processing
-  max_files: 5                 # Use only 3 files (minimal dataset)
-  subsample: 0.005              # Use only 5% of data (ultra-small subset)
+  chunk_size: 50000             # Very small chunks for fast processing
+  max_files: 500                 # Use only 3 files (minimal dataset)
+  subsample: 0.5              # Use only 5% of data (ultra-small subset)
   train_fraction: 0.8          # 80% for training, 20% for validation
   
   # Data loader parameters  
-  batch_size: 2048             # Small batch size for fast iteration
-  num_workers: 2               # Minimal workers
+  batch_size: 32768             # Small batch size for fast iteration
+  num_workers: 0               # Minimal workers
   
   # Scaler fitting parameters
-  scaler_fit_samples: 10000    # Very small sample for scaler fitting
+  scaler_fit_samples: 50000    # Very small sample for scaler fitting
   
   # Data preprocessing
-  active_threshold: 1e-12       # Threshold for active/quiescent classification
+  active_threshold: 1.0e-12       # Threshold for active/quiescent classification
   random_seed: 42
 
 # Model Configuration - Smaller Network for Fast Testing
@@ -75,7 +75,7 @@ training:
   # Training parameters - MINIMAL
   epochs: 40                    # Increased from 10 to 100 for longer training
   learning_rate: 0.001         # Standard learning rate
-  weight_decay: 1e-5           # L2 regularization
+  weight_decay: 1.0e-5           # L2 regularization
   
   # Multi-GPU and distributed training
   gradient_accumulation_steps: 1  # No accumulation for simplicity
@@ -88,11 +88,11 @@ training:
     mode: "min"
     factor: 0.5
     patience: 50
-    min_lr: 1e-7
+    min_lr: 1.0e-7
   
   # Regularization and stability
   gradient_clip_norm: 1.0      # Gradient clipping for stability
-  early_stopping_patience: 5  # Short patience for quick exit
+  early_stopping_patience: 50  # Short patience for quick exit
   
   # Device configuration
   device: "auto"               # Auto-detect GPU/CPU
@@ -127,10 +127,10 @@ hardware:
     memory_per_node: "64GB"    # Less memory needed
 
 # Performance Expectations - Test Scale
-performance:
+#performance:
   # Expected throughput (samples/second) - much higher due to small model
-  target_throughput:
-    single_gpu: 15000          # Higher throughput with small model
+  #target_throughput:
+    #single_gpu: 15000          # Higher throughput with small model
 
   
 

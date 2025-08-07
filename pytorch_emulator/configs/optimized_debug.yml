@@ -1,0 +1,120 @@
+# DEBUG Configuration for Optimized Streaming + Parallel Training
+# Quick validation run before full production training
+
+experiment:
+  name: "optimized_debug"
+  version: "v1.0-debug"
+  description: "Debug run: optimized loader, 10 files, no subsampling, 5 epochs, multi-GPU"
+  framework: "pytorch"
+
+data:
+  loader_type: "optimized"  # Use optimized streaming data loader
+  data_path: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/e3sm/processed_data/"
+  out_path: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/pytorch_multi_gpu_outputs/"
+  scaler_cache_dir: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/scaler_cache_optimized/"
+  input_cols:
+    - "QC_TAU_in"
+    - "QR_TAU_in"
+    - "NC_TAU_in"
+    - "NR_TAU_in"
+    - "PGAM"
+    - "LAMC"
+    - "LAMR"
+    - "N0R"
+    - "RHO_CLUBB"
+    - "CLOUD"
+    - "FREQR"
+  output_cols:
+    - "qctend_TAU"
+    - "nctend_TAU"
+    - "nrtend_TAU"
+    - "qrtend_TAU"
+  chunk_size: 50000
+  max_files: 10          # Small subset for debug
+  subsample: 1.0         # No subsampling - use all data
+  train_fraction: 0.8
+  batch_size: 8192       # Reasonable batch size
+  num_workers: 0         # Keep at 0 for stability
+  scaler_fit_samples: 100000
+  active_threshold: 1.0e-12
+  random_seed: 42
+
+model:
+  input_dim: 11
+  shared_dims: [256, 256, 128, 128, 64]
+  head_dim: 64
+  dropout: 0.1
+  activation: "relu"
+  constraint_enforcement: true
+  mass_conservation: true
+  alpha: 0.3
+  huber_delta: 1.0
+  conservation_weight: 0.1
+  use_masking: true
+
+training:
+  epochs: 5              
+  learning_rate: 0.001
+  weight_decay: 1.0e-5
+  gradient_accumulation_steps: 1
+  use_amp: true
+  optimizer: "adam"
+  scheduler: "reduce_lr_on_plateau"
+  scheduler_params:
+    mode: "min"
+    factor: 0.5
+    patience: 10
+    min_lr: 1.0e-7
+  gradient_clip_norm: 1.0
+  early_stopping_patience: 20
+  device: "auto"
+  validation_frequency: 1
+  checkpoint_frequency: 2
+
+
+
+logging:
+  log_level: "INFO"
+  save_checkpoints: true
+  checkpoint_frequency: 2
+  log_frequency: 10
+  wandb:
+    project: null
+    entity: null
+    group: null
+    job_type: null
+    tags: null
+
+hardware:
+  device: "auto"
+  num_workers: 0
+  pin_memory: true
+  single_node:
+    gpus: 4
+    memory_per_gpu: "40GB"
+  distributed:
+    nodes: 1
+    gpus_per_node: 4
+    total_gpus: 4
+    cpus_per_gpu: 4
+    memory_per_node: "64GB"
+
+evaluation:
+  eval_frequency: 1
+  compute_physics_metrics: true
+  compute_regime_metrics: true
+  constraint_tolerance:
+    qrtend_min: 0.0
+    nctend_max: 0.0
+    mass_conservation: 1.0e-6
+  active_threshold: 1.0e-12
+
+advanced:
+  pin_memory: true
+  persistent_workers: false
+  use_deterministic: false
+  benchmark_mode: true
+  save_top_k: 3
+  save_last: true
+  auto_resume: false
+  checkpoint_every_n_steps: 500 
