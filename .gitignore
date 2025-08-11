@@ -121,3 +121,8 @@ docs/
 *.pkl
 *.json
 
+
+# Local dev/editor artifacts
+.cursor/
+*.code-workspace
+*.tgz
