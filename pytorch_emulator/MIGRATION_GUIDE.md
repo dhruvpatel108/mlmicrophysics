@@ -6,7 +6,7 @@
 - [x] Export current conda environment (`environment.yml`)
 - [x] Export package list (`requirements_conda.txt`)
 - [x] Sync code to GitHub repository
-- [ ] Create comprehensive README for new cluster setup
+- [x] Create comprehensive README for new cluster setup (see `pytorch_emulator/README_DECEPTION.md`)
 - [ ] Document cluster-specific configurations
 
 ### **Phase 2: Environment Setup**
