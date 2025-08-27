@@ -1,0 +1,42 @@
+# Base numeric/scientific stack (align with conda specs)
+numpy==2.0.2
+scipy==1.13.1
+pandas==2.2.3
+xarray==2024.7.0
+netCDF4==1.7.2
+h5py==3.13.0
+
+# Arrow / IO
+pyarrow==20.0.0
+s3fs==2025.5.0
+
+# Dask runtime (keep aligned)
+dask==2024.8.0
+distributed==2024.8.0
+
+# Visualization / CLI
+matplotlib==3.9.4
+pyyaml==6.0.2
+tqdm==4.67.1
+seaborn==0.13.2
+rich==14.0.0
+
+# Optimization / ML
+scikit-learn==1.6.1
+optuna==3.6.2
+xgboost==2.1.4
+
+# Geo/Proj (optional for plotting)
+pyproj==3.6.1
+shapely==2.0.7
+cartopy==0.23.0
+
+# Project-specific utilities
+echo-opt==1.2
+
+# PyTorch (CUDA 11.8 wheels)
+# When installing via pip manually, use the extra index below or install these separately with --index-url
+#--extra-index-url https://download.pytorch.org/whl/cu118
+#torch==2.6.0+cu118
+#torchvision==0.21.0+cu118
+#torchaudio==2.6.0+cu118 

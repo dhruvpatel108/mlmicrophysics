@@ -18,6 +18,3 @@ python scripts/evaluate_model.py \
 --checkpoint /pscratch/sd/d/dvpatel/mlmicrophysics_project/pytorch_multi_gpu_outputs/run_41230175/best_checkpoint.pth \
 --config configs/optimized_production_full.yml \
 --output_dir evaluation_results/run41230175
-
-
-

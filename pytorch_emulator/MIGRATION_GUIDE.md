@@ -10,11 +10,10 @@
 - [ ] Document cluster-specific configurations
 
 ### **Phase 2: Environment Setup**
-- [ ] Create conda environment on Deception
-- [ ] Install PyTorch with CUDA support
-- [ ] Verify all dependencies are compatible
-- [ ] Test data loading and preprocessing
-- [ ] Validate model training pipeline
+- [ ] Create Python venv on Deception (conda discouraged)
+- [ ] Install PyTorch CUDA 11.8 wheels
+- [ ] Install remaining Python dependencies
+- [ ] Verify imports and CUDA availability
 
 ### **Phase 3: Data Migration**
 - [ ] Transfer processed parquet files
@@ -44,8 +43,8 @@
 ```
 mlmicrophysics-pytorch/
 ├── README.md                    # Main documentation
-├── environment.yml              # Conda environment
-├── requirements_conda.txt       # Package list
+├── environment.yml              # Conda environment (reference only)
+├── requirements_conda.txt       # Package list (reference only)
 ├── setup.py                     # Package installation
 ├── configs/                     # Configuration files
 ├── models/                      # Model implementations
@@ -61,37 +60,29 @@ mlmicrophysics-pytorch/
 - ✅ Configuration files (YAML)
 - ✅ SLURM job scripts
 - ✅ Documentation (README, migration guide)
-- ✅ Environment files
+- ✅ Environment files (for reference)
 - ❌ Large data files (use .gitignore)
 - ❌ Output directories (use .gitignore)
 - ❌ Checkpoint files (use .gitignore)
 
-### **2. Environment Setup on Deception**
+### **2. Environment Setup on Deception (venv)**
 
-#### **Step 1: Clone Repository**
+#### **Step 1: Create venv and install packages**
 ```bash
-git clone <your-github-repo>
-cd mlmicrophysics-pytorch
+# From repo root
+bash pytorch_emulator/scripts/setup_deception_env.sh
 ```
+This script will:
+- Load `cuda/11.8` (if modules are available)
+- Create `~/.venvs/mlmicrophysics-env`
+- Install PyTorch wheels for CUDA 11.8
+- Install remaining requirements and the local package (`pip install -e .`)
 
-#### **Step 2: Create Conda Environment**
+#### **Step 2: Activate and verify**
 ```bash
-# Load conda module (if needed)
-module load conda
-
-# Create environment from exported file
-conda env create -f environment.yml
-
-# Activate environment
-conda activate mlmicrophysics-env
-```
-
-#### **Step 3: Verify Installation**
-```bash
-# Test imports
-python -c "import torch; print(f'PyTorch: {torch.__version__}')"
-python -c "import torch.cuda; print(f'CUDA available: {torch.cuda.is_available()}')"
-python -c "import dask; print(f'Dask: {dask.__version__}')"
+source ~/.venvs/mlmicrophysics-env/bin/activate
+python -c "import torch; print('Torch:', torch.__version__); print('CUDA:', torch.cuda.is_available())"
+python -c "import dask, pandas, xarray; print('Dask:', dask.__version__)"
 ```
 
 ### **3. Data Migration Strategy**
@@ -150,20 +141,20 @@ logging:
 #SBATCH --output=slurm_%j.out
 #SBATCH --error=slurm_%j.err
 
-# Load modules (adjust for Deception)
+# Load modules
 module purge
 module load cuda/11.8
-module load conda
 
 # Activate environment
-source activate mlmicrophysics-env
+source ~/.venvs/mlmicrophysics-env/bin/activate
 
 # Set environment variables
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export OMP_NUM_THREADS=4
 
 # Run training
-python scripts/train_streaming_parallel.py configs/multi_gpu_production.yml
+python pytorch_emulator/scripts/train_streaming_parallel.py \
+  pytorch_emulator/configs/multi_gpu_production.yml
 ```
 
 ### **6. Performance Optimization**
@@ -191,11 +182,10 @@ python -c "import torch; print(torch.cuda.get_device_name(0))"
 ### **2. Module Loading Issues**
 ```bash
 # Check available modules
-module avail
+module avail | cat
 
 # Load required modules
-module load cuda
-module load conda
+module load cuda/11.8
 ```
 
 ### **3. Data Path Issues**

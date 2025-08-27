@@ -86,6 +86,10 @@ class ConstraintAwareTrainer:
         self.best_val_loss = float('inf')
         self.patience_counter = 0
         
+        # Logging frequency
+        logging_config = config.get('logging', {})
+        self.log_frequency = int(logging_config.get('log_frequency', 50))
+
         # Logging setup
         self.setup_logging(config)
         
@@ -231,7 +235,7 @@ class ConstraintAwareTrainer:
             self.global_step += 1
             
             # Log batch metrics
-            if batch_idx % 50 == 0:
+            if self.log_frequency > 0 and batch_idx % self.log_frequency == 0:
                 logger.info(
                     f"Epoch {self.epoch}, Batch {batch_idx}/{len(train_loader)}, "
                     f"Loss: {total_loss.item():.6f}, "

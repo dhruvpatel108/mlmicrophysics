@@ -89,6 +89,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+.venv-3.11/
 
 # Spyder project settings
 .spyderproject
@@ -126,3 +127,11 @@ docs/
 .cursor/
 *.code-workspace
 *.tgz
+
+# Data folder
+data_from_nersc/
+
+
+# Readme files
+pytorch_emulator/MIGRATION_GUIDE.md
+pytorch_emulator/README_DECEPTION.md

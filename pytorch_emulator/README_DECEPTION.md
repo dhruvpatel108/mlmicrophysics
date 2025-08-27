@@ -17,11 +17,14 @@ cd mlmicrophysics
 git checkout pytorch-emulator
 ```
 
-## 2) Create and activate the environment
+## 2) Create and activate the environment (venv; no conda)
+Deception discourages conda. Use a Python virtual environment and CUDA 11.8 PyTorch wheels.
 ```bash
-module load conda  # adjust if your site uses a different module name
-conda env create -f environment.yml
-conda activate mlmicrophysics-env
+# One-time setup
+bash pytorch_emulator/scripts/setup_deception_env.sh
+
+# Activate for interactive/dev work
+source ~/.venvs/mlmicrophysics-env/bin/activate
 ```
 
 ## 3) Set paths (adjust for your project)
@@ -61,11 +64,9 @@ Create `run_deception_test.sbatch`:
 #SBATCH --error=slurm_%j.err
 
 module purge
-module load conda
-# load CUDA if site requires an explicit module
-# module load cuda/11.8
+module load cuda/11.8
 
-source activate mlmicrophysics-env
+source ~/.venvs/mlmicrophysics-env/bin/activate
 
 export DATA_DIR=/path/to/processed_data
 export OUTPUT_DIR=/path/to/outputs
@@ -81,8 +82,13 @@ sbatch run_deception_test.sbatch
 tail -f slurm_<JOBID>.out
 ```
 
+## Notes specific to Deception
+- Prefer venv over conda for environments.
+- Use performant storage for `DATA_DIR` and outputs; see the Deception filesystem guidance.
+- If using filesystem compression or special paths, consult the system documentation.
+
 ## Troubleshooting
-- CUDA or driver mismatch: ensure the CUDA module matches your PyTorch build
+- CUDA or driver mismatch: ensure the CUDA module matches your PyTorch build (this guide uses CUDA 11.8 wheels)
 - Permission errors: verify `DATA_DIR`, `OUTPUT_DIR`, `CHECKPOINT_DIR` exist and are writable
 - OOM on GPU: reduce `batch_size` in your config
 - Slow first batch: confirm data path is on performant storage

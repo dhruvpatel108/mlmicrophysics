@@ -110,6 +110,10 @@ class DataParallelTrainer:
         self.best_val_loss = float('inf')
         self.patience_counter = 0
         
+        # Logging frequency
+        logging_config = config.get('logging', {})
+        self.log_frequency = int(logging_config.get('log_frequency', 50))
+        
         # Setup logging (only on main process)
         if self.is_main_process:
             self.setup_logging(config)
@@ -305,7 +309,7 @@ class DataParallelTrainer:
         #logger.info(f"ckpt: pre batch loop")
         for batch_idx, (inputs, targets) in enumerate(train_loader):
             t_batch_start = time.time()
-            logger.info(f"Training batch_idx: {batch_idx}")
+            #logger.info(f"Training batch_idx: {batch_idx}")
             # Move to device
             inputs = inputs.to(self.device, non_blocking=True)
             targets = {k: v.to(self.device, non_blocking=True) for k, v in targets.items()}
@@ -369,7 +373,7 @@ class DataParallelTrainer:
             epoch_metrics['active_samples'].append(active_count)
             
             # Log progress
-            if self.is_main_process and batch_idx % 50 == 0:
+            if self.is_main_process and self.log_frequency > 0 and batch_idx % self.log_frequency == 0:
                 current_lr = self.optimizer.param_groups[0]['lr']
                 
                 # Detailed loss component logging
@@ -386,14 +390,14 @@ class DataParallelTrainer:
                     reg_loss = reg_loss.item()
                 
                 # Use batch_idx + 1 to show current batch number (1-indexed)
-                print(
+                logger.info(
                     f"Epoch {self.epoch+1}, Batch {batch_idx + 1}, "
                     f"Loss: {loss.item():.6f}, LR: {current_lr:.2e}, "
                     f"CLS: {cls_loss:.4f}, REG: {reg_loss:.4f}, "
                     f"Active: {active_count}/{total_samples} ({active_fraction:.2%})"
                 )
             t_batch_end = time.time()
-            logger.info(f"Batch {batch_idx + 1} took {t_batch_end - t_batch_start:.2f} seconds")
+            #logger.info(f"Batch {batch_idx + 1} took {t_batch_end - t_batch_start:.2f} seconds")
         # Synchronize metrics across processes for distributed training
         if self.is_distributed:
             # Average losses across all processes
@@ -557,7 +561,7 @@ class DataParallelTrainer:
             # Logging (only on main process)
             if self.is_main_process:
                 epoch_time = time.time() - epoch_start_time
-                logger.info(
+                print(
                     f"Epoch {epoch+1}/{self.epochs} Summary: "
                     f"Train Loss: {train_metrics['train_loss']:.6f} "
                     f"(CLS: {train_metrics['classification_loss']:.4f}, REG: {train_metrics['regression_loss']:.4f}), "
@@ -692,7 +696,7 @@ if __name__ == "__main__":
     trainer = DataParallelTrainer(
         model=nn.Linear(10, 1),  # Dummy model
         loss_fn=nn.MSELoss(),    # Dummy loss
-        config={'training': {}, 'data': {}},
+        config={'training': {}, 'data': {}, 'logging': {'log_frequency': 1}}, # Added log_frequency
         rank=rank,
         world_size=world_size
     )
@@ -700,6 +704,7 @@ if __name__ == "__main__":
     print(f"✅ Trainer device: {trainer.device}")
     print(f"✅ Distributed: {trainer.is_distributed}")
     print(f"✅ Mixed precision: {trainer.use_amp}")
+    print(f"✅ Log frequency: {trainer.log_frequency}") # Added log_frequency check
     
     trainer.cleanup()
     print("✅ Parallel training setup test completed!") 

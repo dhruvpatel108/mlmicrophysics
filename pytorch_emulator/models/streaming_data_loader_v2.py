@@ -136,8 +136,14 @@ class OptimizedStreamingDataset(IterableDataset):
         if not self.active_files:
             return 0
         
-        with open("/pscratch/sd/d/dvpatel/mlmicrophysics_project/e3sm/processed_data/row_dict.pkl", "rb") as f:
-                row_dict = pickle.load(f)
+        # For Perlmutter
+        #with open("/people/pate014/nersc_mlmicro/mlmicrophysics/data_from_nersc/processed_data/row_dict.pkl", "rb") as f:
+        #        row_dict = pickle.load(f)
+        #f.close()
+
+        # For Deception
+        with open("/rcfs/projects/pioneercloud/dhruv/processed_data/row_dict.pkl", "rb") as f:
+            row_dict = pickle.load(f)
         f.close()
         
         total_row = 0
