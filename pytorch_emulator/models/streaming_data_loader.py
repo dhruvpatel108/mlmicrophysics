@@ -273,7 +273,11 @@ class StreamingMicrophysicsDataset(IterableDataset):
         try:
             chunk = chunk.copy()
             
-            # 1. Log transformations for skewed variables
+            # 1. Create active/quiescent labels from the ORIGINAL data first
+            chunk["is_active"] = (np.abs(chunk["qctend_TAU"]) > self.active_threshold).astype(float)
+
+            
+            # 2. Log transformations for skewed variables
             log_transform_cols = [
                 "QC_TAU_in", "QR_TAU_in", "NC_TAU_in", "NR_TAU_in", 
                 "LAMC", "LAMR", "N0R"
@@ -295,9 +299,7 @@ class StreamingMicrophysicsDataset(IterableDataset):
                     abs_val = np.abs(chunk[col]) + epsilon
                     chunk[col] = sign * np.log10(abs_val)
             
-            # 2. Create active/quiescent labels based on qctend_TAU
-            chunk["is_active"] = (np.abs(chunk["qctend_TAU"]) > self.active_threshold).astype(float)
-            
+
             # 3. Ensure required columns exist
             required_cols = self.input_cols + self.output_cols + ["is_active"]
             missing_cols = [col for col in required_cols if col not in chunk.columns]

@@ -104,7 +104,11 @@ class MicrophysicsDataset(Dataset):
         """Apply preprocessing transformations."""
         df = df.copy()
         
-        # 1. Log transformations for skewed variables (from EDA analysis)
+        # 1. Create active/quiescent labels from the ORIGINAL data first
+        df["is_active"] = (np.abs(df["qctend_TAU"]) > self.active_threshold).astype(float)
+
+
+        # 2. Log transformations for skewed variables (from EDA analysis)
         log_transform_cols = [
             "QC_TAU_in", "QR_TAU_in", "NC_TAU_in", "NR_TAU_in", 
             "LAMC", "LAMR", "N0R"
@@ -125,8 +129,6 @@ class MicrophysicsDataset(Dataset):
                 abs_val = np.abs(df[col]) + 1e-10
                 df[col] = sign * np.log10(abs_val)
         
-        # 2. Create active/quiescent labels based on qctend_TAU
-        df["is_active"] = (np.abs(df["qctend_TAU"]) > self.active_threshold).astype(float)
         
         # 3. Ensure required columns exist
         required_cols = self.input_cols + self.output_cols + ["is_active"]

@@ -260,7 +260,11 @@ class OptimizedStreamingDataset(IterableDataset):
         try:
             chunk = chunk.copy()
             
-            # 1. Log transformations (vectorized)
+            # 1. Create active/quiescent labels from the ORIGINAL data first
+            chunk["is_active"] = (np.abs(chunk["qctend_TAU"]) > self.active_threshold).astype(float)
+            
+
+            # 2. Log transformations (vectorized)
             log_transform_cols = [
                 "QC_TAU_in", "QR_TAU_in", "NC_TAU_in", "NR_TAU_in", 
                 "LAMC", "LAMR", "N0R"
@@ -280,8 +284,6 @@ class OptimizedStreamingDataset(IterableDataset):
                     abs_val = np.abs(chunk[col]) + epsilon
                     chunk[col] = sign * np.log10(abs_val)
             
-            # 2. Create active/quiescent labels (vectorized)
-            chunk["is_active"] = (np.abs(chunk["qctend_TAU"]) > self.active_threshold).astype(float)
             
             # 3. Apply sampling if needed
             if self.sample_fraction < 1.0:
