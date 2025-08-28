@@ -123,7 +123,8 @@ def make_predictions(model, data_loader, device='cpu'):
                 if key in targets:
                     all_targets[key].append(targets[key].cpu().numpy())
             
-            if batch_idx % 10 == 0:
+            log_freq = int(config.get('logging', {}).get('log_frequency', 10))
+            if log_freq > 0 and batch_idx % log_freq == 0:
                 logger.info(f"  Processed {batch_idx}/{len(data_loader)} batches")
     
     # Concatenate all batches

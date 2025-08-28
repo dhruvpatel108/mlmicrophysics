@@ -138,8 +138,9 @@ def test_data_loader_performance(
             batch_size = len(inputs)
             total_samples += batch_size
             
-            # Log progress every 10 batches
-            if batch_idx % 10 == 0:
+            # Log progress every N batches (match config if provided)
+            log_freq = int(config.get('logging', {}).get('log_frequency', 10))
+            if log_freq > 0 and batch_idx % log_freq == 0:
                 avg_time = sum(batch_times) / len(batch_times)
                 throughput = batch_size / batch_time
                 logger.info(f"  Batch {batch_idx:3d}: {batch_size:4d} samples, "
