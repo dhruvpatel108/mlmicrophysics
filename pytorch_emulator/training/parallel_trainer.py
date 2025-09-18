@@ -686,26 +686,100 @@ class DataParallelTrainer:
 
                     # Image logging cadence
                     if epoch % self.image_log_interval == 0:
+                        # Create classification-aware scatter plots
                         fig, axes = plt.subplots(2, 2, figsize=(12, 10))
                         axes = axes.flatten()
+                        
+                        # Determine correctly vs incorrectly classified points
+                        if preds_all['is_active'].size and trues_all['is_active'].size:
+                            y_true_bin = (trues_all['is_active'] >= 0.5).astype(bool)
+                            y_pred_bin = (preds_all['is_active'] >= 0.5).astype(bool)
+                            correct_mask = (y_true_bin == y_pred_bin)
+                            incorrect_mask = ~correct_mask
+                            
+                            # Count misclassified points for info
+                            n_correct = correct_mask.sum()
+                            n_incorrect = incorrect_mask.sum()
+                            n_total = len(correct_mask)
+                            misclass_rate = n_incorrect / n_total if n_total > 0 else 0.0
+                        else:
+                            # Fallback: treat all as correctly classified if no classification data
+                            correct_mask = np.ones(len(preds_all[pairs[0][0]]), dtype=bool) if preds_all[pairs[0][0]].size else np.array([], dtype=bool)
+                            incorrect_mask = np.zeros_like(correct_mask, dtype=bool)
+                            misclass_rate = 0.0
+                            n_correct = len(correct_mask)
+                            n_incorrect = 0
+                        
                         for ax, (pkey, tkey, title) in zip(axes, pairs):
                             y_pred = preds_all[pkey]
                             y_true = trues_all[tkey]
                             if y_pred.size and y_true.size:
-                                ax.scatter(y_true, y_pred, s=2, alpha=0.3)
+                                # Plot correctly classified points as blue dots
+                                if correct_mask.sum() > 0:
+                                    ax.scatter(y_true[correct_mask], y_pred[correct_mask], 
+                                             s=2, alpha=0.3, color='blue', label='Correctly Classified')
+                                
+                                # Plot misclassified points as red crosses
+                                if incorrect_mask.sum() > 0:
+                                    ax.scatter(y_true[incorrect_mask], y_pred[incorrect_mask], 
+                                             s=6, alpha=0.7, color='red', marker='x', 
+                                             label='Misclassified', linewidth=1)
+                                
+                                # Perfect prediction line
                                 lo = float(min(y_true.min(), y_pred.min()))
                                 hi = float(max(y_true.max(), y_pred.max()))
-                                ax.plot([lo, hi], [lo, hi], 'r--', linewidth=1)
+                                ax.plot([lo, hi], [lo, hi], 'k--', linewidth=1, alpha=0.5)
+                                
                                 r2 = r2s[pkey]
                                 ax.set_title(f"{title}\nR² = {r2:.4f}", fontsize=11)
+                                
+                                # Add legend only to first subplot to avoid clutter
+                                if ax == axes[0] and (correct_mask.sum() > 0 or incorrect_mask.sum() > 0):
+                                    ax.legend(fontsize=8, loc='upper left')
                             else:
                                 ax.set_title(f"{title}\n(no data)", fontsize=11)
                             ax.set_xlabel('True', fontsize=9)
                             ax.set_ylabel('Pred', fontsize=9)
                             ax.grid(True, alpha=0.2)
+                        
+                        # Add overall misclassification info to the figure
+                        fig.suptitle(f'Tendency Predictions \n (Misclassification Rate: {misclass_rate:.2%})', 
+                                   fontsize=14, y=0.98)
                         plt.tight_layout()
+                        plt.subplots_adjust(top=0.94)  # Make room for suptitle
                         wandb.log({'val/scatter_all': wandb.Image(fig)}, step=epoch)
                         plt.close(fig)
+                        
+                        # Create histogram plots for tendencies
+                        hist_fig, hist_axes = plt.subplots(2, 2, figsize=(12, 10))
+                        hist_axes = hist_axes.flatten()
+                        for ax, (pkey, tkey, title) in zip(hist_axes, pairs):
+                            y_pred = preds_all[pkey]
+                            y_true = trues_all[tkey]
+                            if y_pred.size and y_true.size:
+                                # Determine common range for both histograms
+                                min_val = min(y_true.min(), y_pred.min())
+                                max_val = max(y_true.max(), y_pred.max())
+                                bins = np.linspace(min_val, max_val, 50)
+                                
+                                # Plot overlaid histograms
+                                ax.hist(y_true, bins=bins, alpha=0.7, label='True', 
+                                       color='blue', density=False)
+                                ax.hist(y_pred, bins=bins, alpha=0.7, label='Predicted', 
+                                       color='red', density=False)
+                                
+                                ax.set_xlabel(f'{title} Values', fontsize=9)
+                                ax.set_ylabel('Count', fontsize=9)
+                                ax.set_title(f'{title} - Distribution Comparison', fontsize=11)
+                                ax.legend()
+                                ax.grid(True, alpha=0.3)
+                            else:
+                                ax.set_title(f"{title}\n(no data)", fontsize=11)
+                                ax.set_xlabel('Values', fontsize=9)
+                                ax.set_ylabel('Count', fontsize=9)
+                        plt.tight_layout()
+                        wandb.log({'val/histograms_all': wandb.Image(hist_fig)}, step=epoch)
+                        plt.close(hist_fig)
                 except Exception as e:
                     logger.warning(f"W&B epoch-level logging failed: {e}")
             
