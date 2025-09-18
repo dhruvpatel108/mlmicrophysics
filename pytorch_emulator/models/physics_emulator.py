@@ -25,14 +25,15 @@ class ConstraintAwareEmulator(nn.Module):
         self,
         input_dim: int = 11,
         shared_dims: List[int] = [256, 128, 64],
-        head_dim: int = 32,
+        head_dims: List[int] = [64, 32, 16],
+        #head_dim: int = 32,
         dropout: float = 0.1
     ):
         super().__init__()
         
         self.input_dim = input_dim
         self.shared_dims = shared_dims
-        self.head_dim = head_dim
+        self.head_dims = head_dims
         self.dropout = dropout
         
         # Build shared backbone
@@ -49,18 +50,19 @@ class ConstraintAwareEmulator(nn.Module):
         
         self.shared_backbone = nn.Sequential(*backbone_layers)
         
+        """
         # Classification head: Is_Active (active vs quiescent)
         self.classifier_head = nn.Sequential(
-            nn.Linear(shared_dims[-1], head_dim),
+            nn.Linear(shared_dims[-1], head_dims[0]),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(head_dim, int(head_dim/2)),
+            nn.Linear(head_dims[0], head_dims[1]),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(int(head_dim/2), 1)
+            nn.Linear(head_dims[1], 1)
             # Removed: nn.Sigmoid() - BCEWithLogitsLoss handles sigmoid internally
         )
-        
+
         # Regression heads with constraint activations
         # qrtend: Must be ≥ 0 (rain formation is always positive)
         # For log-transformed data we don't need to apply ReLU to ensure ≥ 0
@@ -89,7 +91,55 @@ class ConstraintAwareEmulator(nn.Module):
             nn.Linear(head_dim, 1)
             # No constraint activation
         )
-        
+        """
+        # Deeper heads for reacher representation 
+        # starting with shared_dims[-1] and going through head_dims ending with 1
+        # Classification head
+        classifier_head_layers = []
+        input_dim = shared_dims[-1]
+        for i in range(len(head_dims)):
+            classifier_head_layers.append(nn.Linear(input_dim, head_dims[i]))
+            classifier_head_layers.append(nn.ReLU())
+            classifier_head_layers.append(nn.Dropout(dropout))
+            input_dim = head_dims[i]
+        classifier_head_layers.append(nn.Linear(input_dim, 1))
+        self.classifier_head = nn.Sequential(*classifier_head_layers)
+
+        # Regression heads with constraint activations
+        # qrtend: Must be ≥ 0 (rain formation is always positive)
+        # For log-transformed data we don't need to apply ReLU to ensure ≥ 0
+        qrtend_head_layers = []
+        input_dim = shared_dims[-1]
+        for i in range(len(head_dims)):
+            qrtend_head_layers.append(nn.Linear(input_dim, head_dims[i]))
+            qrtend_head_layers.append(nn.ReLU())
+            qrtend_head_layers.append(nn.Dropout(dropout))
+            input_dim = head_dims[i]
+        qrtend_head_layers.append(nn.Linear(input_dim, 1))
+        self.qrtend_head = nn.Sequential(*qrtend_head_layers)
+
+        # nctend: Must be ≤ 0 (cloud droplet loss)
+        nctend_head_layers = []
+        input_dim = shared_dims[-1]
+        for i in range(len(head_dims)):
+            nctend_head_layers.append(nn.Linear(input_dim, head_dims[i]))
+            nctend_head_layers.append(nn.ReLU())
+            nctend_head_layers.append(nn.Dropout(dropout))
+            input_dim = head_dims[i]
+        nctend_head_layers.append(nn.Linear(input_dim, 1))
+        self.nctend_head = nn.Sequential(*nctend_head_layers)
+
+        # nrtend: Can be positive or negative (rain number can increase/decrease)
+        nrtend_head_layers = []
+        input_dim = shared_dims[-1]
+        for i in range(len(head_dims)):
+            nrtend_head_layers.append(nn.Linear(input_dim, head_dims[i]))
+            nrtend_head_layers.append(nn.ReLU())
+            nrtend_head_layers.append(nn.Dropout(dropout))
+            input_dim = head_dims[i]
+        nrtend_head_layers.append(nn.Linear(input_dim, 1))
+        self.nrtend_head = nn.Sequential(*nrtend_head_layers)
+
         # Initialize weights
         self._init_weights()
     
@@ -156,7 +206,7 @@ class ConstraintAwareEmulator(nn.Module):
             'total_parameters': self.get_parameter_count(),
             'input_dim': self.input_dim,
             'shared_dims': self.shared_dims,
-            'head_dim': self.head_dim,
+            'head_dims': self.head_dims,
             'dropout': self.dropout,
             'constraints': {
                 'qrtend': '≥ 0 (ReLU)',

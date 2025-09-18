@@ -63,10 +63,16 @@ def setup_model_and_loss(config: Dict, device: torch.device) -> tuple:
     model_config = config['model']
     
     # Create model
+    # Backward-compat: accept 'head_dims' or fallback to single 'head_dim'
+    head_dims = model_config.get('head_dims')
+    if head_dims is None:
+        single = model_config.get('head_dim')
+        head_dims = [single] if single is not None else [64]
+
     model = ConstraintAwareEmulator(
         input_dim=model_config['input_dim'],
         shared_dims=model_config['shared_dims'],
-        head_dim=model_config['head_dim'],
+        head_dims=head_dims,
         dropout=model_config.get('dropout', 0.1)
     )
     
@@ -307,11 +313,14 @@ def validate_config(config: Dict) -> bool:
     
     # Validate model config
     model_config = config['model']
-    required_model_keys = ['input_dim', 'shared_dims', 'head_dim']
-    for key in required_model_keys:
+    # Require input_dim and shared_dims, and one of head_dims/head_dim
+    for key in ['input_dim', 'shared_dims']:
         if key not in model_config:
             logger.error(f"Missing required model parameter '{key}'")
             return False
+    if 'head_dims' not in model_config and 'head_dim' not in model_config:
+        logger.error("Missing required model parameter 'head_dims' (or legacy 'head_dim')")
+        return False
     
     # Validate data config
     data_config = config['data']

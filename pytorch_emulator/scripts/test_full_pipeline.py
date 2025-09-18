@@ -75,7 +75,7 @@ def test_model_creation():
     model = ConstraintAwareEmulator(
         input_dim=11,
         shared_dims=[64, 32, 16],
-        head_dim=8,
+        head_dims=[8],
         dropout=0.1
     )
     
