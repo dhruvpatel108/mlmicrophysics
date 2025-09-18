@@ -17,6 +17,8 @@ from torch.utils.data import Dataset, DataLoader, IterableDataset
 import pandas as pd
 import numpy as np
 from pathlib import Path
+from datetime import datetime
+import os
 from sklearn.preprocessing import StandardScaler
 from typing import Dict, List, Tuple, Optional, Iterator, Union
 import logging
@@ -455,9 +457,14 @@ def create_streaming_data_loaders(
     input_cols = data_config.get('input_cols', [])
     output_cols = data_config.get('output_cols', [])
     
-    # Create scaler cache directory
-    scaler_cache_path = Path(scaler_cache_dir) / "input_scaler.pkl"
-    scaler_cache_path.parent.mkdir(parents=True, exist_ok=True)
+    # Create per-run scaler cache directory similar to checkpointing
+    job_id = os.environ.get('SLURM_JOB_ID')
+    if job_id is None:
+        job_id = datetime.now().strftime('%Y%m%d_%H%M%S')
+    run_cache_dir = Path(scaler_cache_dir) / f"run_{job_id}"
+    run_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    scaler_cache_path = run_cache_dir / "input_scaler.pkl"
     
     # Create training dataset (for fitting scaler)
     logger.info("Creating training dataset and fitting scaler...")
