@@ -1,5 +1,5 @@
 experiment:
-  name: "deception_distributed_test"
+  name: "files100_subsample1.0_epoch30_largeBS_regression"
   version: "v0.1"
   description: "Quick 100-file, 1% subsample, 5-epoch Data distributed training test on Deception using optimized streaming loader"
   framework: "pytorch"
@@ -28,31 +28,38 @@ data:
     - "qrtend_TAU"
   chunk_size: 1000000
   max_files: 100
-  subsample: 0.005
+  subsample: 0.1
   train_fraction: 0.8
-  batch_size: 2097152
+  batch_size: 8421376
   num_workers: 0
-  scaler_fit_samples: 1000000
-  active_threshold: 1.0e-12
+  #scale_outputs: true
+  scaler_fit_samples: 10000000
+  active_threshold: 1.0e-10
   random_seed: 42
+  input_transform: log10
+  input_scaling: standard
+  output_transform: quantile
+  output_scaling: robust
+  quantile_n_quantiles: 200000
+  quantile_subsample: 20000000
 
 model:
   input_dim: 11
-  shared_dims: [256, 256, 256, 128, 128, 64]
-  head_dim: 64
-  dropout: 0.1
+  shared_dims: [256, 256, 256, 128, 128]
+  head_dims: [128, 128, 64, 64, 32]
+  dropout: 0.0
   activation: "relu"
   constraint_enforcement: true
   mass_conservation: true
-  alpha: 0.9
+  alpha: 0.1
   huber_delta: 1.0
   conservation_weight: 0.1
   use_masking: true
 
 training:
-  epochs: 10
+  epochs: 100
   learning_rate: 0.001
-  weight_decay: 1.0e-5
+  weight_decay: 0.0
   gradient_accumulation_steps: 1
   use_amp: false
   optimizer: "adam"
@@ -60,10 +67,10 @@ training:
   scheduler_params:
     mode: "min"
     factor: 0.5
-    patience: 5
+    patience: 20
     min_lr: 1.0e-7
   gradient_clip_norm: 1.0
-  early_stopping_patience: 10
+  early_stopping_patience: 100
   device: "auto"
   validation_frequency: 1
   checkpoint_frequency: 1

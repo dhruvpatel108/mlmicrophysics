@@ -19,7 +19,7 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime
 import os
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, RobustScaler, QuantileTransformer
 from typing import Dict, List, Tuple, Optional, Iterator, Union
 import logging
 import random
@@ -59,9 +59,15 @@ class OptimizedStreamingDataset(IterableDataset):
         train_fraction: float = 0.8,
         scaler_path: Optional[str] = None,
         output_scaler_path: Optional[str] = None,
+        output_transformer_path: Optional[str] = None,
         mode: str = "fit_transform",
         disable_length_estimation: bool = False,  # Disable length estimation for large datasets
-        scale_outputs: bool = False
+        input_transform: str = "log10",
+        output_transform: str = "log10",
+        input_scaling: str = "standard",
+        output_scaling: str = "standard",
+        quantile_n_quantiles: int = 1000,
+        quantile_subsample: int = 100000
     ):
         """Initialize optimized streaming dataset."""
         super().__init__()
@@ -79,9 +85,15 @@ class OptimizedStreamingDataset(IterableDataset):
         self.train_fraction = train_fraction
         self.scaler_path = scaler_path
         self.output_scaler_path = output_scaler_path
+        self.output_transformer_path = output_transformer_path
         self.mode = mode
         self.disable_length_estimation = disable_length_estimation
-        self.scale_outputs = bool(scale_outputs)
+        self.input_transform = (input_transform or "log10").lower()
+        self.output_transform = (output_transform or "log10").lower()
+        self.input_scaling = (input_scaling or "standard").lower()
+        self.output_scaling = (output_scaling or "standard").lower()
+        self.quantile_n_quantiles = int(quantile_n_quantiles)
+        self.quantile_subsample = int(quantile_subsample)
         
         # Initialize random state
         self.rng = np.random.RandomState(random_seed)
@@ -92,10 +104,16 @@ class OptimizedStreamingDataset(IterableDataset):
         logger.info(f"Found {len(self.parquet_files)} parquet files")
         
         # Initialize scalers
-        self.input_scaler = StandardScaler()
-        self.output_scaler = StandardScaler()
+        # Initialize scalers based on config
+        self.input_scaler = RobustScaler() if self.input_scaling == 'robust' else StandardScaler()
+        self.output_scaler = RobustScaler() if self.output_scaling == 'robust' else StandardScaler()
+        # Initialize transformers
+        self.input_transformer: Optional[QuantileTransformer] = None
+        self.output_transformer: Optional[QuantileTransformer] = None
         self._load_or_fit_scaler()
         self._load_or_prepare_output_scaler()
+        self._load_or_prepare_input_transformer()
+        self._load_or_prepare_output_transformer()
         
         # Calculate file splits for train/val
         self._calculate_file_splits()
@@ -141,8 +159,6 @@ class OptimizedStreamingDataset(IterableDataset):
 
     def _load_or_prepare_output_scaler(self):
         """Load existing output scaler or prepare to fit new one (if enabled)."""
-        if not self.scale_outputs:
-            return
         if self.output_scaler_path and Path(self.output_scaler_path).exists() and self.mode != "fit_transform":
             logger.info(f"Loading pre-fitted OUTPUT scaler from {self.output_scaler_path}")
             try:
@@ -151,7 +167,29 @@ class OptimizedStreamingDataset(IterableDataset):
             except Exception as e:
                 logger.warning(f"Failed to load output scaler: {e}. Will refit if possible.")
         else:
-            logger.info("Will fit OUTPUT scaler on data (scale_outputs=True)")
+            logger.info("Will fit OUTPUT scaler on data")
+
+    def _load_or_prepare_input_transformer(self):
+        """Load or prepare input quantile transformer if requested."""
+        if self.input_transform != "quantile":
+            return
+        if self.output_transformer_path:  # Reuse path var for symmetry? Better to have input path
+            pass
+        # If we introduce input_transformer_path later, this placeholder keeps structure consistent
+
+    def _load_or_prepare_output_transformer(self):
+        """Load or prepare output quantile transformer if requested."""
+        if self.output_transform != "quantile":
+            return
+        if self.output_transformer_path and Path(self.output_transformer_path).exists() and self.mode != "fit_transform":
+            logger.info(f"Loading pre-fitted OUTPUT QuantileTransformer from {self.output_transformer_path}")
+            try:
+                with open(self.output_transformer_path, 'rb') as f:
+                    self.output_transformer = pickle.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load output QuantileTransformer: {e}. Will refit if possible.")
+        else:
+            logger.info("Will fit OUTPUT QuantileTransformer on data (output_transform=quantile)")
     
     def _estimate_dataset_size(self) -> int:
         """Estimate total dataset size using parquet metadata (fast and accurate)."""
@@ -286,25 +324,26 @@ class OptimizedStreamingDataset(IterableDataset):
             chunk["is_active"] = (np.abs(chunk["qctend_TAU"]) > self.active_threshold).astype(float)
             
 
-            # 2. Log transformations (vectorized)
-            log_transform_cols = [
-                "QC_TAU_in", "QR_TAU_in", "NC_TAU_in", "NR_TAU_in", 
-                "LAMC", "LAMR", "N0R"
-            ]
+            # 2. Input transformation (vectorized)
+            if self.input_transform == "log10":
+                log_transform_cols = [
+                    "QC_TAU_in", "QR_TAU_in", "NC_TAU_in", "NR_TAU_in", 
+                    "LAMC", "LAMR", "N0R"
+                ]
+                for col in log_transform_cols:
+                    if col in chunk.columns:
+                        epsilon = 1e-10
+                        chunk[col] = np.log10(np.maximum(chunk[col], epsilon))
             
-            for col in log_transform_cols:
-                if col in chunk.columns:
-                    epsilon = 1e-10
-                    chunk[col] = np.log10(np.maximum(chunk[col], epsilon))
-            
-            # Log transform output tendencies (vectorized)
-            output_log_cols = ["qctend_TAU", "nctend_TAU", "nrtend_TAU", "qrtend_TAU"]
-            for col in output_log_cols:
-                if col in chunk.columns:
-                    epsilon = 1e-10
-                    sign = np.sign(chunk[col])
-                    abs_val = np.abs(chunk[col]) + epsilon
-                    chunk[col] = sign * np.log10(abs_val)
+            # Output transformation: only apply log10 here; quantile done later in transform stage
+            if self.output_transform == "log10":
+                output_log_cols = ["qctend_TAU", "nctend_TAU", "nrtend_TAU", "qrtend_TAU"]
+                for col in output_log_cols:
+                    if col in chunk.columns:
+                        epsilon = 1e-10
+                        sign = np.sign(chunk[col])
+                        abs_val = np.abs(chunk[col]) + epsilon
+                        chunk[col] = sign * np.log10(abs_val)
             
             
             # 3. Apply sampling if needed
@@ -339,8 +378,15 @@ class OptimizedStreamingDataset(IterableDataset):
         if len(chunk) == 0:
             return
         
-        # Scale all inputs at once (vectorized)
-        input_data = self.input_scaler.transform(chunk[self.input_cols].values)
+        # Inputs: transform then scale
+        input_matrix = chunk[self.input_cols].values
+        if self.input_transform == 'quantile' and self.input_transformer is not None:
+            try:
+                input_matrix = self.input_transformer.transform(input_matrix)
+            except Exception as e:
+                logger.debug(f"Input quantile transform failed or not fitted yet: {e}")
+        # scale
+        input_data = self.input_scaler.transform(input_matrix)
         
         # Create all target arrays at once (vectorized)
         targets_data = {}
@@ -350,11 +396,17 @@ class OptimizedStreamingDataset(IterableDataset):
         outputs_matrix = None
         if self.output_cols:
             outputs_matrix = chunk[self.output_cols].values
-            if self.scale_outputs and outputs_matrix is not None:
+            if outputs_matrix is not None:
+                # transform
+                if self.output_transform == "quantile" and self.output_transformer is not None:
+                    try:
+                        outputs_matrix = self.output_transformer.transform(outputs_matrix)
+                    except Exception as e:
+                        logger.debug(f"Quantile transform failed or not fitted yet: {e}")
+                # scale
                 try:
                     outputs_matrix = self.output_scaler.transform(outputs_matrix)
                 except Exception as e:
-                    # If scaler not yet fitted in transform mode, pass-through
                     logger.debug(f"Output scaling transform failed or not fitted yet: {e}")
         # Split back into per-target arrays
         for j, col in enumerate(self.output_cols):
@@ -385,15 +437,15 @@ class OptimizedStreamingDataset(IterableDataset):
             yield batch_inputs, batch_targets
     
     def fit_scalers(self, n_samples_for_fitting: int = 100000):
-        """Fit input (and optional output) scalers on a sample of the data."""
+        """Fit input scaler, optional output scaler, and optional quantile transformer on a sample of the data."""
         if self.mode == "transform":
             return
         
-        logger.info(f"Fitting input scaler on {n_samples_for_fitting} samples...")
+        logger.info(f"Preparing to fit transformers/scalers on up to {n_samples_for_fitting} samples...")
         
         samples_collected = 0
         all_inputs = []
-        all_outputs = [] if self.scale_outputs else None
+        all_outputs = []
         
         for file_path in self.active_files:
             if samples_collected >= n_samples_for_fitting:
@@ -416,7 +468,7 @@ class OptimizedStreamingDataset(IterableDataset):
                     if processed_chunk is not None and len(processed_chunk) > 0:
                         inputs = processed_chunk[self.input_cols].values
                         all_inputs.append(inputs)
-                        if self.scale_outputs:
+                        if self.output_cols:
                             outs = processed_chunk[self.output_cols].values
                             all_outputs.append(outs)
                         samples_collected += len(inputs)
@@ -427,36 +479,85 @@ class OptimizedStreamingDataset(IterableDataset):
                 logger.warning(f"Error reading {file_path}: {e}")
                 continue
         
-        # Fit scaler(s) on collected data
+        # Combine
         if all_inputs:
             combined_inputs = np.vstack(all_inputs)
             # Subsample if we have too much data
             if len(combined_inputs) > n_samples_for_fitting:
                 indices = np.random.choice(len(combined_inputs), n_samples_for_fitting, replace=False)
                 combined_inputs = combined_inputs[indices]
-            
-            self.input_scaler.fit(combined_inputs)
-            logger.info(f"Fitted scaler on {len(combined_inputs)} samples")
-            
-            # Save scaler
-            if self.scaler_path:
-                Path(self.scaler_path).parent.mkdir(parents=True, exist_ok=True)
-                with open(self.scaler_path, 'wb') as f:
-                    pickle.dump(self.input_scaler, f)
-                logger.info(f"Saved scaler to {self.scaler_path}")
 
-        if self.scale_outputs and all_outputs:
+        if all_outputs:
             combined_outputs = np.vstack(all_outputs)
             if len(combined_outputs) > n_samples_for_fitting:
                 indices = np.random.choice(len(combined_outputs), n_samples_for_fitting, replace=False)
                 combined_outputs = combined_outputs[indices]
-            self.output_scaler.fit(combined_outputs)
-            logger.info(f"Fitted OUTPUT scaler on {len(combined_outputs)} samples")
+
+        # Fit transformers first (on combined raw arrays)
+        # Inputs quantile
+        if self.input_transform == 'quantile' and all_inputs:
+            inp_for_quant = combined_inputs
+            if len(inp_for_quant) > self.quantile_subsample:
+                indices = np.random.choice(len(inp_for_quant), self.quantile_subsample, replace=False)
+                inp_for_quant = inp_for_quant[indices]
+            self.input_transformer = QuantileTransformer(
+                n_quantiles=min(self.quantile_n_quantiles, inp_for_quant.shape[0]),
+                output_distribution='normal',
+                subsample=self.quantile_subsample,
+                copy=True,
+                random_state=self.random_seed
+            )
+            self.input_transformer.fit(inp_for_quant)
+            logger.info(f"Fitted INPUT QuantileTransformer on {inp_for_quant.shape[0]} samples")
+            # Persist if an input transformer path is provided (not yet wired)
+
+        # Outputs quantile
+        if self.output_transform == 'quantile' and all_outputs:
+            out_for_quant = combined_outputs
+            if len(out_for_quant) > self.quantile_subsample:
+                indices = np.random.choice(len(out_for_quant), self.quantile_subsample, replace=False)
+                out_for_quant = out_for_quant[indices]
+            self.output_transformer = QuantileTransformer(
+                n_quantiles=min(self.quantile_n_quantiles, out_for_quant.shape[0]),
+                output_distribution='normal',
+                subsample=self.quantile_subsample,
+                copy=True,
+                random_state=self.random_seed
+            )
+            self.output_transformer.fit(out_for_quant)
+            logger.info(f"Fitted OUTPUT QuantileTransformer on {out_for_quant.shape[0]} samples")
+            if self.output_transformer_path:
+                Path(self.output_transformer_path).parent.mkdir(parents=True, exist_ok=True)
+                with open(self.output_transformer_path, 'wb') as f:
+                    pickle.dump(self.output_transformer, f)
+                logger.info(f"Saved OUTPUT QuantileTransformer to {self.output_transformer_path}")
+
+        # Prepare transformed arrays for scaler fitting (transform-then-scale)
+        if all_inputs:
+            inputs_for_scaler = combined_inputs
+            if self.input_transform == 'quantile' and self.input_transformer is not None:
+                inputs_for_scaler = self.input_transformer.transform(inputs_for_scaler)
+            # Fit input scaler
+            self.input_scaler.fit(inputs_for_scaler)
+            logger.info(f"Fitted INPUT {self.input_scaling.title()}Scaler on {inputs_for_scaler.shape[0]} samples")
+            if self.scaler_path:
+                Path(self.scaler_path).parent.mkdir(parents=True, exist_ok=True)
+                with open(self.scaler_path, 'wb') as f:
+                    pickle.dump(self.input_scaler, f)
+                logger.info(f"Saved input scaler to {self.scaler_path}")
+
+        if all_outputs:
+            outputs_for_scaler = combined_outputs
+            if self.output_transform == 'quantile' and self.output_transformer is not None:
+                outputs_for_scaler = self.output_transformer.transform(outputs_for_scaler)
+            # Fit output scaler
+            self.output_scaler.fit(outputs_for_scaler)
+            logger.info(f"Fitted OUTPUT {self.output_scaling.title()}Scaler on {outputs_for_scaler.shape[0]} samples")
             if self.output_scaler_path:
                 Path(self.output_scaler_path).parent.mkdir(parents=True, exist_ok=True)
                 with open(self.output_scaler_path, 'wb') as f:
                     pickle.dump(self.output_scaler, f)
-                logger.info(f"Saved OUTPUT scaler to {self.output_scaler_path}")
+                logger.info(f"Saved output scaler to {self.output_scaler_path}")
     
     def _batch_generator(self) -> Iterator[Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
         """Generate batches from files using vectorized processing."""
@@ -542,6 +643,8 @@ def create_optimized_streaming_loaders(
 
     scaler_cache_path = run_cache_dir / "input_scaler_optimized.pkl"
     output_scaler_cache_path = run_cache_dir / "output_scaler_optimized.pkl"
+    output_transformer_cache_path = run_cache_dir / "output_quantile_transformer.pkl"
+    input_transformer_cache_path = run_cache_dir / "input_quantile_transformer.pkl"
     
     # Create training dataset
     logger.info("Creating optimized training dataset...")
@@ -561,7 +664,14 @@ def create_optimized_streaming_loaders(
         output_scaler_path=str(output_scaler_cache_path),
         mode="fit_transform",
         disable_length_estimation=disable_length,
-        scale_outputs=bool(data_config.get('scale_outputs', False))
+        input_transform=str(data_config.get('input_transform', 'log10')).lower(),
+        output_transform=str(data_config.get('output_transform', 'log10')).lower(),
+        input_scaling=str(data_config.get('input_scaling', 'standard')).lower(),
+        output_scaling=str(data_config.get('output_scaling', 'standard')).lower(),
+        output_transformer_path=str(output_transformer_cache_path),
+        # No separate input_transformer_path persisted yet
+        quantile_n_quantiles=int(data_config.get('quantile_n_quantiles', 1000)),
+        quantile_subsample=int(data_config.get('quantile_subsample', 100000))
     )
     
     # Fit scaler(s)
@@ -585,7 +695,13 @@ def create_optimized_streaming_loaders(
         output_scaler_path=str(output_scaler_cache_path),
         mode="transform",
         disable_length_estimation=disable_length,
-        scale_outputs=bool(data_config.get('scale_outputs', False))
+        input_transform=str(data_config.get('input_transform', 'log10')).lower(),
+        output_transform=str(data_config.get('output_transform', 'log10')).lower(),
+        input_scaling=str(data_config.get('input_scaling', 'standard')).lower(),
+        output_scaling=str(data_config.get('output_scaling', 'standard')).lower(),
+        output_transformer_path=str(output_transformer_cache_path),
+        quantile_n_quantiles=int(data_config.get('quantile_n_quantiles', 1000)),
+        quantile_subsample=int(data_config.get('quantile_subsample', 100000))
     )
     
     # Create data loaders (batch_size=None since we're yielding pre-batched data)
