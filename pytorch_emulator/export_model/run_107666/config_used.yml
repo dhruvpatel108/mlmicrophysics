@@ -1,0 +1,95 @@
+experiment:
+    name: "filtered_data_qctendupperlower_cloud_massinput_rho_output_log10_standard"
+    version: "v0.1"
+    description: "762-file, Data distributed training test on Deception using optimized streaming loader"
+    framework: "pytorch"
+  
+data:
+  loader_type: "optimized"
+  data_path: "/rcfs/projects/pioneercloud/dhruv/processed_data"
+  out_path: "/people/pate014/nersc_mlmicro/outputs/deception_distributed_test"
+  scaler_cache_dir: "/people/pate014/nersc_mlmicro/scaler_cache/deception_distributed_test"
+  input_cols:
+    - "QC_TAU_in"
+    - "QR_TAU_in"
+    - "NC_TAU_in"
+    - "NR_TAU_in"
+    - "PGAM"
+    - "LAMC"
+    - "LAMR"
+    - "N0R"
+    - "RHO_CLUBB"
+    - "CLOUD"
+    - "FREQR"
+  output_cols:
+    - "qctend_TAU"
+    - "nctend_TAU"
+    - "nrtend_TAU"
+    - "qrtend_TAU"
+  chunk_size: 1000000
+  max_files: 762
+  subsample: 1.0
+  train_fraction: 0.8
+  batch_size: 8421376
+  num_workers: 0
+  #scale_outputs: true
+  scaler_fit_samples: 10000000
+  active_threshold: 1.0e-15
+  cloud_threshold: 0.01
+  mass_input_threshold: 1.0e-6
+  rho_threshold: 0.2
+  nrtend_threshold: 1.0e-10
+  random_seed: 42
+  input_transform: log10
+  input_scaling: standard
+  output_transform: log10
+  output_scaling: standard
+  quantile_n_quantiles: 200000
+  quantile_subsample: 20000000
+
+model:
+  input_dim: 11
+  shared_dims: [256, 256, 256, 128, 128]
+  head_dims: [128, 128, 64, 64, 32]
+  dropout: 0.0
+  activation: "relu"
+  constraint_enforcement: true
+  mass_conservation: true
+  alpha: 0.0001
+  huber_delta: 1.0
+  conservation_weight: 0.1
+  use_masking: true
+
+training:
+  epochs: 100
+  learning_rate: 0.001
+  weight_decay: 0.0
+  gradient_accumulation_steps: 1
+  use_amp: false
+  optimizer: "adam"
+  scheduler: "reduce_lr_on_plateau"
+  scheduler_params:
+    mode: "min"
+    factor: 0.5
+    patience: 20
+    min_lr: 1.0e-7
+  gradient_clip_norm: 1.0
+  early_stopping_patience: 100
+  device: "auto"
+  validation_frequency: 1
+  checkpoint_frequency: 1
+
+logging:
+  log_level: "INFO"
+  save_checkpoints: true
+  log_frequency: 50
+  epoch_log_frequency: 1
+  image_log_percent: 5
+  wandb:
+    project: mlmicrophysics_emulator
+    entity: dvpatel
+    group: additional_filters
+    job_type: training
+    max_val_batches: 24
+    tags: ["deception", "additional_filters"]
+
