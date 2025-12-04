@@ -225,44 +225,6 @@ Expected output: All samples PASSED with max error ~10⁻⁷
 
 ---
 
-## Git Commit Checklist
-
-Before handoff, ensure the following are committed:
-
-```bash
-git add export_model/emulator_for_e3sm.pt
-git add export_model/input_scaler_params.txt
-git add export_model/output_scaler_params.txt
-git add export_model/sample_ftorch2.f90
-git add export_model/benchmark_with_preprocessing.f90
-git add export_model/validate_emulator.f90
-git add export_model/physical_test_*.txt
-git add export_model/normalized_test_*.txt
-git add export_model/README_E3SM_INTEGRATION.md
-
-git commit -m "Add microphysics emulator for E3SM integration
-
-- TorchScript model: emulator_for_e3sm.pt (4 outputs: qrtend, nctend, nrtend, qctend)
-- Scaler parameters for input/output normalization
-- Reference Fortran code with preprocessing pipeline
-- Validation test data and benchmark results
-- Integration guide for E3SM collaborators
-
-Performance: ~441 µs per sample on CPU
-Preprocessing overhead: <0.1% of total time"
-```
-
----
-
-## Contact & Support
-
-For questions about:
-- **Model architecture/training**: [Your name/email]
-- **E3SM integration**: [Collaborator name/email]
-- **FTorch issues**: https://github.com/Cambridge-ICCS/FTorch
-
----
-
 ## Quick Reference
 
 ### Compilation Command
