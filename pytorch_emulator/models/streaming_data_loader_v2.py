@@ -21,6 +21,7 @@ from datetime import datetime
 import os
 from sklearn.preprocessing import StandardScaler, RobustScaler, QuantileTransformer
 from typing import Dict, List, Tuple, Optional, Iterator, Union
+import time
 import logging
 import random
 import pickle
@@ -53,7 +54,11 @@ class OptimizedStreamingDataset(IterableDataset):
         chunk_size: int = 50000,  # Samples per file chunk
         max_files: Optional[int] = None,
         sample_fraction: float = 1.0,
-        active_threshold: float = 1.0e-12,
+        active_threshold: float = 1.0e-15,
+        cloud_threshold: Optional[float] = 0.01,
+        mass_input_threshold: Optional[float] = 1.0e-5,
+        rho_threshold: Optional[float] = 0.2,
+        nrtend_threshold: Optional[float] = 1.0e-10,
         random_seed: int = 42,
         split: str = "train",  # "train", "val", or "all"
         train_fraction: float = 0.8,
@@ -67,7 +72,9 @@ class OptimizedStreamingDataset(IterableDataset):
         input_scaling: str = "standard",
         output_scaling: str = "standard",
         quantile_n_quantiles: int = 1000,
-        quantile_subsample: int = 100000
+        quantile_subsample: int = 100000,
+        rank: int = 0,
+        world_size: int = 1
     ):
         """Initialize optimized streaming dataset."""
         super().__init__()
@@ -79,7 +86,11 @@ class OptimizedStreamingDataset(IterableDataset):
         self.chunk_size = chunk_size
         self.max_files = max_files
         self.sample_fraction = sample_fraction
-        self.active_threshold = float(active_threshold)  
+        self.active_threshold = float(active_threshold)
+        self.cloud_threshold = float(cloud_threshold) if cloud_threshold is not None else None
+        self.mass_input_threshold = float(mass_input_threshold) if mass_input_threshold is not None else None
+        self.rho_threshold = float(rho_threshold) if rho_threshold is not None else None
+        self.nrtend_threshold = float(nrtend_threshold) if nrtend_threshold is not None else None
         self.random_seed = random_seed
         self.split = split
         self.train_fraction = train_fraction
@@ -94,6 +105,8 @@ class OptimizedStreamingDataset(IterableDataset):
         self.output_scaling = (output_scaling or "standard").lower()
         self.quantile_n_quantiles = int(quantile_n_quantiles)
         self.quantile_subsample = int(quantile_subsample)
+        self.rank = rank
+        self.world_size = max(1, world_size)
         
         # Initialize random state
         self.rng = np.random.RandomState(random_seed)
@@ -147,6 +160,11 @@ class OptimizedStreamingDataset(IterableDataset):
                 self.active_files = self.parquet_files[n_train_files:]
         
         logger.info(f"Using {len(self.active_files)} files for {self.split} split")
+
+    def _shard_active_files(self):
+        """Deprecated: retained for backward compatibility (no-op)."""
+        if self.world_size > 1:
+            logger.debug("File-level sharding disabled; using batch-level round robin distribution.")
     
     def _load_or_fit_scaler(self):
         """Load existing scaler or prepare to fit new one."""
@@ -319,12 +337,62 @@ class OptimizedStreamingDataset(IterableDataset):
         """
         try:
             chunk = chunk.copy()
-            
-            # 1. Create active/quiescent labels from the ORIGINAL data first
-            chunk["is_active"] = (np.abs(chunk["qctend_TAU"]) > self.active_threshold).astype(float)
-            
 
-            # 2. Input transformation (vectorized)
+            # 1. Apply physics-informed filtering before any transforms
+            if "qctend_TAU" not in chunk.columns:
+                logger.warning("Column 'qctend_TAU' missing from chunk; skipping chunk")
+                return None
+
+            mask = (np.abs(chunk["qctend_TAU"]) > self.active_threshold) #& (np.abs(chunk["qctend_TAU"]) < 1e-5)
+
+            if self.cloud_threshold is not None:
+                if "CLOUD" in chunk.columns:
+                    mask &= chunk["CLOUD"] > self.cloud_threshold
+                else:
+                    logger.warning("Column 'CLOUD' missing; cloud threshold filter skipped")
+
+            if self.mass_input_threshold is not None:
+                missing_mass_cols = []
+                #for mass_col in ("QC_TAU_in", "QR_TAU_in"):
+                for mass_col in ["QC_TAU_in"]:
+                    if mass_col in chunk.columns:
+                        mask &= chunk[mass_col] > self.mass_input_threshold
+                    else:
+                        missing_mass_cols.append(mass_col)
+                if missing_mass_cols:
+                    logger.warning(
+                        "Missing mass columns for filtering: %s; skipping their thresholds",
+                        ", ".join(missing_mass_cols)
+                    )
+
+            #if self.rho_threshold is not None:
+            #    if "RHO_CLUBB" in chunk.columns:
+            #        mask &= chunk["RHO_CLUBB"] > self.rho_threshold
+            #    else:
+            #        logger.warning("Column 'RHO_CLUBB' missing; rho threshold filter skipped")
+
+            if self.nrtend_threshold is not None:
+                if "nrtend_TAU" in chunk.columns:
+                    mask &= np.abs(chunk["nrtend_TAU"]) > self.nrtend_threshold
+                else:
+                    logger.warning("Column 'nrtend_TAU' missing; nrtend threshold filter skipped")
+
+            if "QC_TAU_in" in chunk.columns and "QR_TAU_in" in chunk.columns:
+                # Ensure values are finite before transforms
+                mask &= np.isfinite(chunk["QC_TAU_in"]) & np.isfinite(chunk["QR_TAU_in"])
+            if "RHO_CLUBB" in chunk.columns:
+                mask &= np.isfinite(chunk["RHO_CLUBB"])
+
+            if not np.any(mask):
+                return None
+
+            chunk = chunk.loc[mask].copy()
+
+            # 2. Create active/quiescent labels from the ORIGINAL data first (post-filter)
+            chunk["is_active"] = (np.abs(chunk["qctend_TAU"]) > self.active_threshold).astype(float)
+
+
+            # 3. Input transformation (vectorized)
             if self.input_transform == "log10":
                 log_transform_cols = [
                     "QC_TAU_in", "QR_TAU_in", "NC_TAU_in", "NR_TAU_in", 
@@ -346,13 +414,13 @@ class OptimizedStreamingDataset(IterableDataset):
                         chunk[col] = sign * np.log10(abs_val)
             
             
-            # 3. Apply sampling if needed
+            # 4. Apply sampling if needed
             if self.sample_fraction < 1.0:
                 n_samples = int(len(chunk) * self.sample_fraction)
                 if n_samples > 0:
                     chunk = chunk.sample(n=n_samples, random_state=self.rng.randint(0, 2**31))
             
-            # 4. Ensure required columns exist and remove NaN
+            # 5. Ensure required columns exist and remove NaN
             required_cols = self.input_cols + self.output_cols + ["is_active"]
             missing_cols = [col for col in required_cols if col not in chunk.columns]
             if missing_cols:
@@ -560,11 +628,15 @@ class OptimizedStreamingDataset(IterableDataset):
                 logger.info(f"Saved output scaler to {self.output_scaler_path}")
     
     def _batch_generator(self) -> Iterator[Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
-        """Generate batches from files using vectorized processing."""
+        """Generate batches from files ensuring every rank sees the same number of steps."""
         
-        # Shuffle files
+        # Shuffle files deterministically based on seeded random state
         active_files = self.active_files.copy()
         random.shuffle(active_files)
+        
+        if self.world_size > 1:
+            batch_group_inputs: List[torch.Tensor] = []
+            batch_group_targets: List[Dict[str, torch.Tensor]] = []
         
         for file_path in active_files:
             try:
@@ -584,12 +656,36 @@ class OptimizedStreamingDataset(IterableDataset):
                     if processed_chunk is None or len(processed_chunk) == 0:
                         continue
                     
-                    # Convert chunk to batches and yield
-                    yield from self._process_chunk_to_batches(processed_chunk)
+                    for batch_inputs, batch_targets in self._process_chunk_to_batches(processed_chunk):
+                        if self.world_size <= 1:
+                            yield batch_inputs, batch_targets
+                            continue
+                        
+                        batch_group_inputs.append(batch_inputs)
+                        batch_group_targets.append(batch_targets)
+                        
+                        if len(batch_group_inputs) == self.world_size:
+                            yield batch_group_inputs[self.rank], batch_group_targets[self.rank]
+                            batch_group_inputs.clear()
+                            batch_group_targets.clear()
             
             except Exception as e:
                 logger.warning(f"Error processing file {file_path}: {e}")
                 continue
+        
+        if self.world_size > 1 and batch_group_inputs:
+            # Pad or drop remainder so that all ranks stay in lock-step
+            remainder = len(batch_group_inputs)
+            if remainder < self.world_size:
+                # Reuse the last available batch to pad the group; safe because training is stochastic
+                last_input = batch_group_inputs[-1]
+                last_target = batch_group_targets[-1]
+                while len(batch_group_inputs) < self.world_size:
+                    batch_group_inputs.append(last_input.clone())
+                    # Clone target tensors to avoid shared references
+                    padded_targets = {k: v.clone() for k, v in last_target.items()}
+                    batch_group_targets.append(padded_targets)
+            yield batch_group_inputs[self.rank], batch_group_targets[self.rank]
     
     def __iter__(self) -> Iterator[Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
         """Iterate over dataset, yielding batches."""
@@ -604,7 +700,10 @@ class OptimizedStreamingDataset(IterableDataset):
         #if hasattr(self, 'disable_length_estimation') and self.disable_length_estimation:
         #    return 1  # Return minimal value to avoid issues
             
-        return max(1, math.ceil(self.estimated_size / self.batch_size))
+        total_batches = max(1, math.ceil(self.estimated_size / self.batch_size))
+        if self.world_size > 1:
+            total_batches = max(1, math.floor(total_batches / self.world_size))
+        return total_batches
 
 
 def create_optimized_streaming_loaders(
@@ -612,7 +711,11 @@ def create_optimized_streaming_loaders(
     config: Dict,
     train_fraction: float = 0.8,
     batch_size: int = 1024,
-    scaler_cache_dir: str = "./scaler_cache"
+    scaler_cache_dir: str = "./scaler_cache",
+    distributed: bool = False,
+    rank: int = 0,
+    world_size: int = 1,
+    run_id_override: Optional[str] = None
 ) -> Tuple[DataLoader, DataLoader, StandardScaler]:
     """
     Create optimized streaming data loaders that yield batches directly.
@@ -634,11 +737,30 @@ def create_optimized_streaming_loaders(
         disable_length = True
         logger.info("Large dataset detected - disabling length estimation to avoid warnings")
     
+    # Extract filtering thresholds with sensible defaults (can be overridden via config)
+    cloud_threshold = data_config.get('cloud_threshold', 0.01)
+    mass_input_threshold = data_config.get('mass_input_threshold', 1e-5)
+    rho_threshold = data_config.get('rho_threshold', 0.2)
+    nrtend_threshold = data_config.get('nrtend_threshold', 1e-10)
+    active_threshold_value = data_config.get('active_threshold', 1e-15)
+    if active_threshold_value is None:
+        active_threshold_value = 1e-15
+
     # Create per-run scaler cache directory similar to checkpointing
-    job_id = os.environ.get('SLURM_JOB_ID')
+    def _normalize_run_id(run_id: str) -> str:
+        return run_id if run_id.startswith("run_") else f"run_{run_id}"
+
+    job_id = (
+        run_id_override
+        or os.environ.get("SCALER_RUN_ID")
+        or os.environ.get("SLURM_JOB_ID")
+    )
     if job_id is None:
-        job_id = datetime.now().strftime('%Y%m%d_%H%M%S')
-    run_cache_dir = Path(scaler_cache_dir) / f"run_{job_id}"
+        job_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    normalized_run_id = _normalize_run_id(job_id)
+    run_cache_dir = Path(scaler_cache_dir) / normalized_run_id
+    if rank == 0:
+        logger.info(f"Using scaler cache directory: {run_cache_dir}")
     run_cache_dir.mkdir(parents=True, exist_ok=True)
 
     scaler_cache_path = run_cache_dir / "input_scaler_optimized.pkl"
@@ -646,8 +768,88 @@ def create_optimized_streaming_loaders(
     output_transformer_cache_path = run_cache_dir / "output_quantile_transformer.pkl"
     input_transformer_cache_path = run_cache_dir / "input_quantile_transformer.pkl"
     
-    # Create training dataset
-    logger.info("Creating optimized training dataset...")
+    is_distributed = distributed and world_size > 1
+
+    def _wait_for_artifact(path: Path, description: str):
+        if not is_distributed or rank == 0:
+            return
+        timeout_s = data_config.get('scaler_wait_timeout', 600)
+        poll_interval = 2
+        waited = 0
+        while not path.exists():
+            time.sleep(poll_interval)
+            waited += poll_interval
+            if waited >= timeout_s:
+                raise TimeoutError(
+                    f"Rank {rank}: timed out waiting for {description} at {path}"
+                )
+
+    expected_artifacts = [scaler_cache_path]
+    if output_cols:
+        expected_artifacts.append(output_scaler_cache_path)
+    output_transform_mode = str(data_config.get('output_transform', 'log10')).lower()
+    if output_transform_mode == 'quantile':
+        expected_artifacts.append(output_transformer_cache_path)
+
+    force_refit = bool(data_config.get('force_refit_scalers', False))
+    artifacts_exist = all(path.exists() for path in expected_artifacts)
+    should_fit_scalers = force_refit or not artifacts_exist
+
+    scaler: Optional[StandardScaler] = None
+
+    if should_fit_scalers:
+        if not is_distributed or rank == 0:
+            logger.info("Creating optimized training dataset for fitting (artifacts missing or refit forced)...")
+            fit_dataset = OptimizedStreamingDataset(
+                data_path=data_path,
+                input_cols=input_cols,
+                output_cols=output_cols,
+                batch_size=actual_batch_size,
+                chunk_size=data_config.get('chunk_size', 50000),
+                max_files=data_config.get('max_files'),
+                sample_fraction=data_config.get('subsample', 1.0),
+                active_threshold=active_threshold_value,
+                cloud_threshold=cloud_threshold,
+                mass_input_threshold=mass_input_threshold,
+                rho_threshold=rho_threshold,
+                nrtend_threshold=nrtend_threshold,
+                random_seed=data_config.get('random_seed', 42),
+                split="train",
+                train_fraction=train_fraction,
+                scaler_path=str(scaler_cache_path),
+                output_scaler_path=str(output_scaler_cache_path),
+                mode="fit_transform",
+                disable_length_estimation=disable_length,
+                input_transform=str(data_config.get('input_transform', 'log10')).lower(),
+                output_transform=output_transform_mode,
+                input_scaling=str(data_config.get('input_scaling', 'standard')).lower(),
+                output_scaling=str(data_config.get('output_scaling', 'standard')).lower(),
+                output_transformer_path=str(output_transformer_cache_path),
+                quantile_n_quantiles=int(data_config.get('quantile_n_quantiles', 1000)),
+                quantile_subsample=int(data_config.get('quantile_subsample', 100000)),
+                rank=0,
+                world_size=1
+            )
+            fit_dataset.fit_scalers(n_samples_for_fitting=data_config.get('scaler_fit_samples', 100000))
+            scaler = fit_dataset.input_scaler
+            del fit_dataset
+        else:
+            scaler = StandardScaler()
+            logger.info(f"Rank {rank}: waiting for scaler artifacts from rank 0...")
+    else:
+        logger.info("Found existing scaler artifacts; reusing cached transformers/scalers.")
+        for artifact in expected_artifacts:
+            logger.debug(f"  Using cached artifact: {artifact}")
+
+    # Ensure scaler artifacts exist before proceeding on non-zero ranks
+    _wait_for_artifact(scaler_cache_path, "input scaler")
+    if output_cols:
+        _wait_for_artifact(output_scaler_cache_path, "output scaler")
+    if str(data_config.get('output_transform', 'log10')).lower() == 'quantile':
+        _wait_for_artifact(output_transformer_cache_path, "output quantile transformer")
+
+    # Stage 2: create sharded datasets that reuse persisted scalers
+    logger.info(f"Creating optimized training dataset (distributed={is_distributed}, rank={rank}, world_size={world_size})")
     train_dataset = OptimizedStreamingDataset(
         data_path=data_path,
         input_cols=input_cols,
@@ -656,28 +858,29 @@ def create_optimized_streaming_loaders(
         chunk_size=data_config.get('chunk_size', 50000),
         max_files=data_config.get('max_files'),
         sample_fraction=data_config.get('subsample', 1.0),
-        active_threshold=data_config.get('active_threshold', 1e-12),
+        active_threshold=active_threshold_value,
+        cloud_threshold=cloud_threshold,
+        mass_input_threshold=mass_input_threshold,
+        rho_threshold=rho_threshold,
+        nrtend_threshold=nrtend_threshold,
         random_seed=data_config.get('random_seed', 42),
         split="train",
         train_fraction=train_fraction,
         scaler_path=str(scaler_cache_path),
         output_scaler_path=str(output_scaler_cache_path),
-        mode="fit_transform",
+        mode="transform",
         disable_length_estimation=disable_length,
         input_transform=str(data_config.get('input_transform', 'log10')).lower(),
         output_transform=str(data_config.get('output_transform', 'log10')).lower(),
         input_scaling=str(data_config.get('input_scaling', 'standard')).lower(),
         output_scaling=str(data_config.get('output_scaling', 'standard')).lower(),
         output_transformer_path=str(output_transformer_cache_path),
-        # No separate input_transformer_path persisted yet
         quantile_n_quantiles=int(data_config.get('quantile_n_quantiles', 1000)),
-        quantile_subsample=int(data_config.get('quantile_subsample', 100000))
+        quantile_subsample=int(data_config.get('quantile_subsample', 100000)),
+        rank=rank if is_distributed else 0,
+        world_size=world_size if is_distributed else 1
     )
     
-    # Fit scaler(s)
-    train_dataset.fit_scalers(n_samples_for_fitting=data_config.get('scaler_fit_samples', 100000))
-    
-    # Create validation dataset
     logger.info("Creating optimized validation dataset...")
     val_dataset = OptimizedStreamingDataset(
         data_path=data_path,
@@ -687,7 +890,11 @@ def create_optimized_streaming_loaders(
         chunk_size=data_config.get('chunk_size', 50000),
         max_files=data_config.get('max_files'),
         sample_fraction=data_config.get('subsample', 1.0),
-        active_threshold=data_config.get('active_threshold', 1e-12),
+        active_threshold=active_threshold_value,
+        cloud_threshold=cloud_threshold,
+        mass_input_threshold=mass_input_threshold,
+        rho_threshold=rho_threshold,
+        nrtend_threshold=nrtend_threshold,
         random_seed=data_config.get('random_seed', 42),
         split="val",
         train_fraction=train_fraction,
@@ -701,7 +908,9 @@ def create_optimized_streaming_loaders(
         output_scaling=str(data_config.get('output_scaling', 'standard')).lower(),
         output_transformer_path=str(output_transformer_cache_path),
         quantile_n_quantiles=int(data_config.get('quantile_n_quantiles', 1000)),
-        quantile_subsample=int(data_config.get('quantile_subsample', 100000))
+        quantile_subsample=int(data_config.get('quantile_subsample', 100000)),
+        rank=rank if is_distributed else 0,
+        world_size=world_size if is_distributed else 1
     )
     
     # Create data loaders (batch_size=None since we're yielding pre-batched data)
@@ -724,7 +933,8 @@ def create_optimized_streaming_loaders(
     logger.info(f"  Val: ~{val_dataset.estimated_size:,} samples, ~{len(val_dataset)} batches")
     logger.info(f"  Batch size: {actual_batch_size}")
     
-    return train_loader, val_loader, train_dataset.input_scaler
+    scaler = train_dataset.input_scaler
+    return train_loader, val_loader, scaler
 
 
 if __name__ == "__main__":

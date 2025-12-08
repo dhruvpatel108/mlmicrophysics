@@ -7,6 +7,7 @@ standardization, and regime labeling as specified in the EDA analysis.
 
 import torch
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -220,7 +221,11 @@ def create_data_loaders(
     data_path: str,
     config: Dict,
     train_fraction: float = 0.8,
-    batch_size: int = 1024
+    batch_size: int = 1024,
+    distributed: bool = False,
+    rank: int = 0,
+    world_size: int = 1,
+    drop_last: bool = False
 ) -> Tuple[DataLoader, DataLoader, MicrophysicsDataset]:
     """
     Create train and validation data loaders.
@@ -264,18 +269,37 @@ def create_data_loaders(
     )
     
     # Create data loaders
+    train_sampler = None
+    val_sampler = None
+    if distributed and world_size > 1:
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=True
+        )
+        val_sampler = DistributedSampler(
+            val_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=False
+        )
+    
     train_loader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size, 
-        shuffle=True,
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         num_workers=0,  # Set to 0 for NERSC compatibility
-        pin_memory=True
+        pin_memory=True,
+        drop_last=drop_last
     )
     
     val_loader = DataLoader(
-        val_dataset, 
-        batch_size=batch_size, 
+        val_dataset,
+        batch_size=batch_size,
         shuffle=False,
+        sampler=val_sampler,
         num_workers=0,
         pin_memory=True
     )

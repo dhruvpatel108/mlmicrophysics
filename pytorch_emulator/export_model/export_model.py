@@ -17,7 +17,6 @@ OUTPUT_TENSOR_ORDER: Sequence[str] = (
     "nctend",
     "nrtend",
     "qctend",
-    "is_active",
 )
 
 

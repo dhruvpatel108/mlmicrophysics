@@ -18,6 +18,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from datetime import datetime
+import time
 import os
 from sklearn.preprocessing import StandardScaler
 from typing import Dict, List, Tuple, Optional, Iterator, Union
@@ -61,7 +62,9 @@ class StreamingMicrophysicsDataset(IterableDataset):
         split: str = "train",  # "train", "val", or "all"
         train_fraction: float = 0.8,
         scaler_path: Optional[str] = None,  # Path to pre-fitted scaler
-        mode: str = "fit_transform"  # "fit_transform", "transform", "fit_only"
+        mode: str = "fit_transform",  # "fit_transform", "transform", "fit_only"
+        rank: int = 0,
+        world_size: int = 1
     ):
         """
         Initialize streaming dataset.
@@ -96,6 +99,8 @@ class StreamingMicrophysicsDataset(IterableDataset):
         self.train_fraction = train_fraction
         self.scaler_path = scaler_path
         self.mode = mode
+        self.rank = rank
+        self.world_size = max(1, world_size)
         
         # Initialize random state
         self.rng = np.random.RandomState(random_seed)
@@ -111,6 +116,7 @@ class StreamingMicrophysicsDataset(IterableDataset):
         
         # Calculate file splits for train/val
         self._calculate_file_splits()
+        self._shard_active_files()
         
         # Estimate dataset size (approximate)
         self.estimated_size = self._estimate_dataset_size()
@@ -142,6 +148,20 @@ class StreamingMicrophysicsDataset(IterableDataset):
             self.active_files = self.parquet_files
         
         logger.info(f"Using {len(self.active_files)} files for {self.split} split")
+    
+    def _shard_active_files(self):
+        """Shard active files across distributed ranks."""
+        if self.world_size <= 1:
+            return
+        if not self.active_files:
+            return
+        sharded = self.active_files[self.rank::self.world_size]
+        if not sharded:
+            logger.warning(
+                f"Rank {self.rank} received no files after sharding; falling back to round-robin across full list."
+            )
+            sharded = self.parquet_files[self.rank::self.world_size] or self.parquet_files
+        self.active_files = sharded
     
     def _load_or_fit_scaler(self):
         """Load pre-fitted scaler or prepare to fit new one."""
@@ -430,13 +450,27 @@ class StreamingMicrophysicsDataset(IterableDataset):
         }
 
 
+def _resolve_run_directory(preferred_run_id: Optional[str]) -> str:
+    """Resolve the run_<id> subdirectory name for scaler caching."""
+    if preferred_run_id:
+        return preferred_run_id if preferred_run_id.startswith("run_") else f"run_{preferred_run_id}"
+    job_id = os.environ.get('SLURM_JOB_ID')
+    if job_id:
+        return f"run_{job_id}" if not str(job_id).startswith("run_") else str(job_id)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    return f"run_{timestamp}"
+
+
 def create_streaming_data_loaders(
     data_path: str,
     config: Dict,
     train_fraction: float = 0.8,
     batch_size: int = 1024,
     num_workers: int = 0,
-    scaler_cache_dir: str = "./scaler_cache"
+    scaler_cache_dir: str = "./scaler_cache",
+    distributed: bool = False,
+    rank: int = 0,
+    world_size: int = 1
 ) -> Tuple[DataLoader, DataLoader, StandardScaler]:
     """
     Create streaming train and validation data loaders.
@@ -458,16 +492,56 @@ def create_streaming_data_loaders(
     output_cols = data_config.get('output_cols', [])
     
     # Create per-run scaler cache directory similar to checkpointing
-    job_id = os.environ.get('SLURM_JOB_ID')
-    if job_id is None:
-        job_id = datetime.now().strftime('%Y%m%d_%H%M%S')
-    run_cache_dir = Path(scaler_cache_dir) / f"run_{job_id}"
+    preferred_run_id = os.environ.get('SCALER_RUN_ID')
+    run_cache_dir = Path(scaler_cache_dir) / _resolve_run_directory(preferred_run_id)
     run_cache_dir.mkdir(parents=True, exist_ok=True)
 
     scaler_cache_path = run_cache_dir / "input_scaler.pkl"
     
-    # Create training dataset (for fitting scaler)
-    logger.info("Creating training dataset and fitting scaler...")
+    is_distributed = distributed and world_size > 1
+
+    # Step 1: ensure scaler is fitted (only rank 0 performs fitting to cover full dataset)
+    if not is_distributed or rank == 0:
+        logger.info("Creating training dataset and fitting scaler...")
+        fit_dataset = StreamingMicrophysicsDataset(
+            data_path=data_path,
+            input_cols=input_cols,
+            output_cols=output_cols,
+            chunk_size=data_config.get('chunk_size', 50000),
+            max_files=data_config.get('max_files'),
+            sample_fraction=data_config.get('subsample', 1.0),
+            random_seed=data_config.get('random_seed', 42),
+            split="train",
+            train_fraction=train_fraction,
+            scaler_path=str(scaler_cache_path),
+            mode="fit_transform",
+            rank=0,
+            world_size=1
+        )
+        fit_dataset.fit_scaler(n_samples_for_fitting=data_config.get('scaler_fit_samples', 100000))
+        scaler = fit_dataset.input_scaler
+        del fit_dataset
+    else:
+        scaler = StandardScaler()
+        logger.info(f"Rank {rank}: waiting for scaler fitted by rank 0...")
+    
+    # Wait for scaler file if necessary
+    if is_distributed and rank != 0:
+        timeout_s = data_config.get('scaler_wait_timeout', 600)
+        poll_interval = 2
+        waited = 0
+        while not scaler_cache_path.exists():
+            time.sleep(poll_interval)
+            waited += poll_interval
+            if waited >= timeout_s:
+                raise TimeoutError(
+                    f"Rank {rank}: timed out waiting for scaler file at {scaler_cache_path}"
+                )
+        with open(scaler_cache_path, 'rb') as f:
+            scaler = pickle.load(f)
+    
+    # Step 2: create sharded datasets for training/validation
+    logger.info(f"Creating streaming datasets (distributed={is_distributed}, rank={rank}, world_size={world_size})")
     train_dataset = StreamingMicrophysicsDataset(
         data_path=data_path,
         input_cols=input_cols,
@@ -479,13 +553,12 @@ def create_streaming_data_loaders(
         split="train",
         train_fraction=train_fraction,
         scaler_path=str(scaler_cache_path),
-        mode="fit_transform"
+        mode="transform",
+        rank=rank if is_distributed else 0,
+        world_size=world_size if is_distributed else 1
     )
+    train_dataset.input_scaler = scaler
     
-    # Fit scaler on training data
-    train_dataset.fit_scaler(n_samples_for_fitting=data_config.get('scaler_fit_samples', 100000))
-    
-    # Create validation dataset (using pre-fitted scaler)
     logger.info("Creating validation dataset...")
     val_dataset = StreamingMicrophysicsDataset(
         data_path=data_path,
@@ -498,8 +571,11 @@ def create_streaming_data_loaders(
         split="val",
         train_fraction=train_fraction,
         scaler_path=str(scaler_cache_path),
-        mode="transform"
+        mode="transform",
+        rank=rank if is_distributed else 0,
+        world_size=world_size if is_distributed else 1
     )
+    val_dataset.input_scaler = scaler
     
     # Create data loaders
     train_loader = DataLoader(
@@ -520,7 +596,7 @@ def create_streaming_data_loaders(
     logger.info(f"  Train: {train_dataset.estimated_size:,} samples")
     logger.info(f"  Val: {val_dataset.estimated_size:,} samples")
     
-    return train_loader, val_loader, train_dataset.input_scaler
+    return train_loader, val_loader, scaler
 
 
 if __name__ == "__main__":

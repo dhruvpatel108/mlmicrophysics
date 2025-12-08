@@ -1,14 +1,15 @@
 experiment:
   name: "files100_subsample1.0_epoch30_largeBS_regression"
   version: "v0.1"
-  description: "Quick 100-file, 1% subsample, 5-epoch Data distributed training test on Deception using optimized streaming loader"
+  #description: "Quick 100-file, 1% subsample, 5-epoch Data distributed training test on Deception using optimized streaming loader"
   framework: "pytorch"
 
 data:
   loader_type: "optimized"
   data_path: "/rcfs/projects/pioneercloud/dhruv/processed_data"
-  out_path: "/people/pate014/nersc_mlmicro/outputs/deception_distributed_test"
-  scaler_cache_dir: "/people/pate014/nersc_mlmicro/scaler_cache/deception_distributed_test"
+  #data_path: "/pscratch/sd/d/dvpatel/mlmicrophysics_project/e3sm/processed_data"
+  #out_path: "/people/pate014/nersc_mlmicro/outputs/deception_distributed_test"
+  #scaler_cache_dir: "/people/pate014/nersc_mlmicro/scaler_cache/deception_distributed_test"
   input_cols:
     - "QC_TAU_in"
     - "QR_TAU_in"
@@ -27,18 +28,14 @@ data:
     - "nrtend_TAU"
     - "qrtend_TAU"
   chunk_size: 1000000
-  max_files: 100
+  max_files: 700
   subsample: 0.1
   train_fraction: 0.8
   batch_size: 8421376
   num_workers: 0
   #scale_outputs: true
   scaler_fit_samples: 10000000
-  active_threshold: 1.0e-15
-  cloud_threshold: 0.01
-  mass_input_threshold: 1.0e-5
-  rho_threshold: 0.2
-  nrtend_threshold: 1.0e-10
+  active_threshold: 1.0e-10
   random_seed: 42
   input_transform: log10
   input_scaling: standard
@@ -88,7 +85,7 @@ logging:
   wandb:
     project: mlmicrophysics_emulator
     entity: dvpatel
-    group: additional_filters
+    group: deception_single_gpu
     job_type: training
-    tags: ["deception", "additional_filters"]
+    tags: ["deception", "single_gpu"]
 

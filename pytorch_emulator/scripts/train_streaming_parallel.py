@@ -51,6 +51,30 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def normalize_run_id(run_id: Optional[str]) -> Optional[str]:
+    """Ensure run IDs are consistently formatted as run_<id>."""
+    if run_id is None:
+        return None
+    run_id = str(run_id).strip()
+    if not run_id:
+        return None
+    return run_id if run_id.startswith("run_") else f"run_{run_id}"
+
+
+def infer_run_id_from_path(path_like: Optional[str]) -> Optional[str]:
+    """Extract run_<id> from a filesystem path."""
+    if not path_like:
+        return None
+    try:
+        path = Path(path_like)
+    except Exception:
+        return None
+    for part in reversed(path.parts):
+        if part.startswith("run_"):
+            return part
+    return None
+
+
 def load_config(config_path: str) -> Dict:
     """Load configuration from YAML file."""
     with open(config_path, 'r') as f:
@@ -118,6 +142,12 @@ def main():
         default=None,
         help='Path to checkpoint to resume from'
     )
+    parser.add_argument(
+        '--scaler_run_id',
+        type=str,
+        default=None,
+        help='Optional run_<id> whose cached scaler artifacts should be reused'
+    )
     
     args = parser.parse_args()
     
@@ -157,8 +187,22 @@ def main():
         logger.info(f"🎯 Multi-GPU: {args.multi_gpu}")
         logger.info(f"🌍 World size: {world_size}")
         logger.info("=" * 60)
+        if args.multi_gpu and args.distributed:
+            logger.warning("`--multi_gpu` ignored because `--distributed` is enabled. DDP already handles multi-GPU usage.")
+        if args.multi_gpu and torch.cuda.is_available() and torch.cuda.device_count() < 2:
+            logger.warning("`--multi_gpu` requested but fewer than two CUDA devices detected. Proceeding with single-GPU training.")
     
     try:
+        inferred_resume_run_id = normalize_run_id(infer_run_id_from_path(args.resume)) if args.resume else None
+        requested_scaler_run_id = (
+            normalize_run_id(args.scaler_run_id)
+            or normalize_run_id(os.environ.get("SCALER_RUN_ID"))
+            or inferred_resume_run_id
+        )
+        if requested_scaler_run_id:
+            os.environ["SCALER_RUN_ID"] = requested_scaler_run_id
+            logger.info(f"📦 Reusing cached scaler artifacts from {requested_scaler_run_id}")
+
         # Setup data loaders with configurable type
         data_config = config['data']
         loader_type = data_config.get('loader_type', 'streaming')  # Default to current streaming
@@ -175,7 +219,10 @@ def main():
                 train_fraction=data_config.get('train_fraction', 0.8),
                 batch_size=data_config.get('batch_size', 1024),
                 num_workers=data_config.get('num_workers', 0),
-                scaler_cache_dir=data_config.get('scaler_cache_dir', './scaler_cache')
+                scaler_cache_dir=data_config.get('scaler_cache_dir', './scaler_cache'),
+                distributed=args.distributed,
+                rank=rank,
+                world_size=world_size
             )
         elif loader_type == 'dask':
             # Use Dask-based data loader
@@ -198,7 +245,11 @@ def main():
                 config=config,
                 train_fraction=data_config.get('train_fraction', 0.8),
                 batch_size=data_config.get('batch_size', 1024),
-                scaler_cache_dir=data_config.get('scaler_cache_dir', './scaler_cache')
+                scaler_cache_dir=data_config.get('scaler_cache_dir', './scaler_cache'),
+                distributed=args.distributed,
+                rank=rank,
+                world_size=world_size,
+                run_id_override=requested_scaler_run_id
             )
         else:
             raise ValueError(f"Unknown loader_type '{loader_type}'. "
@@ -206,14 +257,33 @@ def main():
         
         if is_main_process:
             logger.info("✅ Streaming data loaders created successfully")
-            # Print dataset lengths
-            logger.info(f"📊 Dataset sizes:")
-            logger.info(f"   Training dataset: {len(train_loader.dataset):,} samples")
-            logger.info(f"   Validation dataset: {len(val_loader.dataset):,} samples")
+            logger.info("📊 Dataset sizes:")
+            if hasattr(train_loader, "dataset"):
+                logger.info(f"   Training dataset: {len(train_loader.dataset):,} samples")
+            if hasattr(val_loader, "dataset"):
+                logger.info(f"   Validation dataset: {len(val_loader.dataset):,} samples")
             logger.info(f"   Batch size: {data_config.get('batch_size', 1024)}")
-            logger.info(f"   Training batches: {len(train_loader)}")
-            logger.info(f"   Validation batches: {len(val_loader)}")
+            try:
+                logger.info(f"   Training batches: {len(train_loader)}")
+                logger.info(f"   Validation batches: {len(val_loader)}")
+            except TypeError:
+                logger.info("   Training batches: iterable (length not precomputed)")
+                logger.info("   Validation batches: iterable (length not precomputed)")
+            logger.info(
+                "   Active filter thresholds -> |qctend_TAU|: %s, CLOUD: %s, mass inputs: %s, rho: %s, |nrtend_TAU|: %s",
+                data_config.get('active_threshold'),
+                data_config.get('cloud_threshold'),
+                data_config.get('mass_input_threshold'),
+                data_config.get('rho_threshold'),
+                data_config.get('nrtend_threshold')
+            )
             logger.info("🧠 Setting up model and loss function...")
+        else:
+            logger.debug("Non-main rank finished data loader setup.")
+
+        if args.distributed and dist.is_initialized():
+            logger.info("⏳ Synchronizing ranks before model setup...")
+            dist.barrier()
         
         model, loss_fn = setup_model_and_loss(config, device)
         
@@ -232,7 +302,8 @@ def main():
             config=config,
             rank=rank,
             world_size=world_size,
-            device="auto"
+            device="auto",
+            use_data_parallel=bool(args.multi_gpu and not args.distributed)
         )
         
         # Resume from checkpoint if specified
@@ -249,9 +320,9 @@ def main():
                 trainer.model.load_state_dict(checkpoint['model_state_dict'])
             
             # Load optimizer and scheduler state
-            trainer.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            if trainer.scheduler and checkpoint.get('scheduler_state_dict'):
-                trainer.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            #trainer.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            #if trainer.scheduler and checkpoint.get('scheduler_state_dict'):
+            #    trainer.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             if trainer.scaler and checkpoint.get('scaler_state_dict'):
                 trainer.scaler.load_state_dict(checkpoint['scaler_state_dict'])
             

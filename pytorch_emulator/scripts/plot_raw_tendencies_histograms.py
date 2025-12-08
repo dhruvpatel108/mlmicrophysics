@@ -270,7 +270,6 @@ def main():
     plot_hist_grid(logt, title='Log10-transformed tendencies (sign * log10(|x|+eps))', bins=args.bins,
                    fig_path=Path(args.output_dir) / f'log10_tendencies_{args.max_samples}_eps{args.eps}.png')
     
-    #breako
     # 3) Active-only, defined by |qctend_TAU| > threshold on RAW values
     if 'qctend_TAU' not in tendency_cols:
         logger.warning("qctend_TAU not in output_cols; cannot compute active mask. Skipping active-only histogram.")

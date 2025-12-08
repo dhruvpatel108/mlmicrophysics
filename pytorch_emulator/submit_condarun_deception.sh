@@ -34,7 +34,8 @@ echo "============================================="
 # We only load modules and source the conda command;
 # the environment activation is handled by `conda run`.
 module purge || true
-module load cuda/11.8 || true
+# Avoid loading a specific CUDA module to prevent library conflicts with PyTorch's CUDA runtime
+# module load cuda/11.8 || true
 module load python/miniconda24.1.2
 source /share/apps/python/miniconda24.1.2/etc/profile.d/conda.sh
 
@@ -62,16 +63,25 @@ echo "==================="
 echo "GPUs allocated:"
 # UPDATED: We use a separate srun/conda run command for nvidia-smi.
 srun nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader
-echo "Python version: $(conda run -n a100-ml-env python -V)"
+echo "Python version: $(conda run -n ml_centos7_robust_env python -V)"
 echo "PyTorch and CUDA check:"
-# UPDATED: We use conda run to explicitly get info from the correct environment.
-conda run -n ml_stable_env python -c "import torch; import sys; print('  Torch:', torch.__version__, '\n  CUDA Available:', torch.cuda.is_available(), '\n  Device Count:', torch.cuda.device_count())"
+# UPDATED: Run under srun to inherit SLURM's GPU binding and print more diagnostics.
+srun conda run -n ml_centos7_robust_env python -c "import os, torch; print('  Torch:', torch.__version__, '\n  Torch CUDA:', torch.version.cuda, '\n  CUDA Built:', torch.backends.cuda.is_built(), '\n  CUDA Available:', torch.cuda.is_available(), '\n  Device Count:', torch.cuda.device_count(), '\n  CUDA_VISIBLE_DEVICES:', os.environ.get('CUDA_VISIBLE_DEVICES'))"
 echo "==================="
 
 # UPDATED: The definitive srun command
 # It uses 'conda run' to ensure the correct environment is loaded for the task.
-srun conda run -n ml_stable_env python -u scripts/train_streaming_parallel.py \
-  --config configs/deception_quick_test.yml
+# Guard: fail fast if CUDA is not available to avoid CPU fallback
+srun conda run -n ml_centos7_robust_env python -c "import sys, torch; sys.exit(0 if torch.cuda.is_available() else 2)"
+
+if [ $? -ne 0 ]; then
+  echo "❌ CUDA is not available in the selected environment (ml_stable_env). Aborting training."
+  echo "   Hint: Ensure the environment has a CUDA-enabled PyTorch (pytorch-cuda=12.x)."
+  exit 2
+fi
+
+srun conda run -n ml_centos7_robust_env python -u scripts/train_streaming_parallel.py \
+  --config configs/deception_quick_test.yml --resume /people/pate014/nersc_mlmicro/outputs/deception_distributed_test/run_9659273/best_checkpoint.pth --device cuda
 
 # Check result
 if [ $? -eq 0 ]; then
