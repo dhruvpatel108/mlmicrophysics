@@ -121,6 +121,10 @@ docs/
 *.pdf
 *.pkl
 *.json
+*.pt
+*.csv
+*.bin
+*.txt
 
 
 # Local dev/editor artifacts
@@ -138,3 +142,19 @@ pytorch_emulator/README_DECEPTION.md
 
 # wandb artifacts
 wandb/
+
+# Fortran build artifacts
+*.o
+*.mod
+*.smod
+*.a
+*.so
+*.exe
+*.out
+
+# Executables in export_model directory (matching common patterns)
+pytorch_emulator/export_model/benchmark_*
+pytorch_emulator/export_model/test_*
+pytorch_emulator/export_model/validate_*
+pytorch_emulator/export_model/sample_ftorch*
+!pytorch_emulator/export_model/*.f90

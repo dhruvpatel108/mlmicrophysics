@@ -1,0 +1,86 @@
+experiment:
+  name: "filtered_data_smoke_test"
+  version: "v0.1"
+  description: "5-epoch smoke test with heavily subsampled data to validate multi-GPU pipeline end-to-end"
+  framework: "pytorch"
+
+data:
+  loader_type: "optimized"
+  data_path: "/rcfs/projects/pioneercloud/dhruv/processed_data"
+  out_path: "/people/pate014/nersc_mlmicro/outputs/smoke_test"
+  scaler_cache_dir: "/people/pate014/nersc_mlmicro/scaler_cache/smoke_test"
+  input_cols:
+    - "QC_TAU_in"
+    - "QR_TAU_in"
+    - "NC_TAU_in"
+    - "NR_TAU_in"
+    - "PGAM"
+    - "LAMC"
+    - "LAMR"
+    - "N0R"
+    - "RHO_CLUBB"
+    - "CLOUD"
+    - "FREQR"
+  output_cols:
+    - "qctend_TAU"
+    - "nctend_TAU"
+    - "nrtend_TAU"
+    - "qrtend_TAU"
+  chunk_size: 200000
+  max_files: 25
+  subsample: 1.0
+  train_fraction: 0.8
+  batch_size: 2097152
+  num_workers: 0
+  scaler_fit_samples: 500000
+  active_threshold: 1.0e-15
+  cloud_threshold: 0.01
+  mass_input_threshold: 1.0e-6
+  rho_threshold: 0.2
+  nrtend_threshold: 1.0e-10
+  random_seed: 42
+  input_transform: log10
+  input_scaling: standard
+  output_transform: log10
+  output_scaling: standard
+  quantile_n_quantiles: 10000
+  quantile_subsample: 200000
+
+model:
+  input_dim: 11
+  shared_dims: [256, 256, 128]
+  head_dims: [128, 64, 32]
+  dropout: 0.1
+  activation: "relu"
+  constraint_enforcement: true
+  mass_conservation: true
+  alpha: 0.1
+  huber_delta: 1.0
+  conservation_weight: 0.1
+  use_masking: true
+
+training:
+  epochs: 5
+  learning_rate: 0.0005
+  weight_decay: 0.0
+  gradient_accumulation_steps: 1
+  use_amp: true
+  optimizer: "adam"
+  scheduler: "cosine"
+  gradient_clip_norm: 1.0
+  early_stopping_patience: 5
+  device: "auto"
+
+logging:
+  log_level: "INFO"
+  save_checkpoints: true
+  log_frequency: 10
+  epoch_log_frequency: 1
+  image_log_percent: 0
+  wandb:
+    project: mlmicrophysics_emulator
+    entity: dvpatel
+    group: smoke_test
+    job_type: training
+    tags: ["smoke_test", "validation"]
+
