@@ -15,7 +15,7 @@ Key Features:
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, IterableDataset
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -60,7 +60,8 @@ class DataParallelTrainer:
         config: Dict,
         rank: int = 0,
         world_size: int = 1,
-        device: str = "auto"
+        device: str = "auto",
+        use_data_parallel: bool = False
     ):
         """
         Initialize parallel trainer.
@@ -72,10 +73,12 @@ class DataParallelTrainer:
             rank: Process rank for distributed training
             world_size: Total number of processes
             device: Device specification ('auto', 'cpu', 'cuda', or specific GPU)
+            use_data_parallel: Enable `nn.DataParallel` when multiple GPUs are visible
         """
         self.config = config
         self.rank = rank
         self.world_size = world_size
+        self.use_data_parallel = use_data_parallel
         self.is_distributed = world_size > 1
         self.is_main_process = rank == 0
         
@@ -116,6 +119,10 @@ class DataParallelTrainer:
         self.epoch_log_frequency = int(logging_config.get('epoch_log_frequency', 1))
         self.image_log_percent = float(logging_config.get('image_log_percent', 5))
         self.image_log_interval = max(1, int(self.epochs * (self.image_log_percent / 100.0)))
+        wandb_config = config.get('wandb', {})
+        self.wandb_max_val_batches = int(wandb_config.get('max_val_batches', 8))
+        if self.wandb_max_val_batches < 0:
+            self.wandb_max_val_batches = 0
         
         # Setup logging (only on main process)
         if self.is_main_process:
@@ -184,19 +191,28 @@ class DataParallelTrainer:
         
         if self.is_distributed:
             # Use DistributedDataParallel for best performance
+            device_ids = None
+            output_device = None
+            if self.device.type == 'cuda':
+                if self.device.index is None:
+                    raise RuntimeError("Expected CUDA device index to be set when using distributed training")
+                device_ids = [self.device.index]
+                output_device = self.device.index
             model = DDP(
                 model,
-                device_ids=[self.device] if self.device.type == 'cuda' else None,
-                output_device=self.device if self.device.type == 'cuda' else None,
+                device_ids=device_ids,
+                output_device=output_device,
                 find_unused_parameters=False  # Set to True if model has unused params
             )
             if self.is_main_process:
                 logger.info("Using DistributedDataParallel")
-        elif torch.cuda.device_count() > 1:
+        elif self.use_data_parallel and torch.cuda.device_count() > 1:
             # Use DataParallel for single-node multi-GPU
             model = DP(model)
             if self.is_main_process:
                 logger.info(f"Using DataParallel with {torch.cuda.device_count()} GPUs")
+        elif self.use_data_parallel and torch.cuda.device_count() <= 1 and self.is_main_process:
+            logger.warning("DataParallel requested but fewer than 2 CUDA devices detected. Continuing with single device.")
         
         return model
     
@@ -260,6 +276,20 @@ class DataParallelTrainer:
             )
         else:
             return None
+
+    def _set_epoch_for_loader(self, loader: DataLoader, epoch: int):
+        """Safely set epoch for loaders that expose a sampler."""
+        dataset = getattr(loader, 'dataset', None)
+        if isinstance(dataset, IterableDataset):
+            return
+        sampler = None
+        try:
+            sampler = loader.sampler  # May raise for iterable datasets
+        except (AttributeError, TypeError, ValueError):
+            sampler = None
+
+        if sampler is not None and hasattr(sampler, 'set_epoch'):
+            sampler.set_epoch(epoch)
     
     def setup_logging(self, config: Dict):
         """Setup logging including W&B (only on main process)."""
@@ -300,13 +330,20 @@ class DataParallelTrainer:
     def train_epoch(self, train_loader: DataLoader) -> Dict[str, float]:
         """Train for one epoch with gradient accumulation and mixed precision."""
         self.model.train()
-        epoch_losses = []
-        epoch_metrics = {
-            'classification_loss': [],
-            'regression_loss': [],
-            'conservation_loss': [],
-            'active_samples': []
+        loss_sum = 0.0
+        loss_count = 0.0
+        metric_sums = {
+            'classification_loss': 0.0,
+            'regression_loss': 0.0,
+            'conservation_loss': 0.0
         }
+        metric_counts = {
+            'classification_loss': 0.0,
+            'regression_loss': 0.0,
+            'conservation_loss': 0.0
+        }
+        active_total = 0.0
+        sample_total = 0.0
         
         self.optimizer.zero_grad()
         #logger.info(f"ckpt: pre batch loop")
@@ -371,18 +408,20 @@ class DataParallelTrainer:
                 self.global_step += 1
             
             # Collect metrics
-            epoch_losses.append(loss.item() * self.gradient_accumulation_steps)
+            loss_value = loss.item() * self.gradient_accumulation_steps
+            loss_sum += loss_value
+            loss_count += 1.0
             for key, value in loss_dict.items():
-                if key in epoch_metrics:
-                    # Handle both tensor and scalar values
-                    if hasattr(value, 'item'):
-                        epoch_metrics[key].append(value.item())
-                    else:
-                        epoch_metrics[key].append(float(value))
+                if key in metric_sums:
+                    metric_value = value.item() if hasattr(value, 'item') else float(value)
+                    metric_sums[key] += metric_value
+                    metric_counts[key] += 1.0
             
             # Count active samples
-            active_count = targets['is_active'].sum().item()
-            epoch_metrics['active_samples'].append(active_count)
+            if 'is_active' in targets:
+                active_count = targets['is_active'].sum().item()
+                active_total += active_count
+                sample_total += targets['is_active'].numel()
             
             # Log progress
             if self.is_main_process and self.log_frequency > 0 and batch_idx % self.log_frequency == 0:
@@ -412,18 +451,43 @@ class DataParallelTrainer:
             #logger.info(f"Batch {batch_idx + 1} took {t_batch_end - t_batch_start:.2f} seconds")
         # Synchronize metrics across processes for distributed training
         if self.is_distributed:
-            # Average losses across all processes
-            epoch_loss_tensor = torch.tensor(epoch_losses).to(self.device)
-            dist.all_reduce(epoch_loss_tensor, op=dist.ReduceOp.SUM)
-            epoch_losses = (epoch_loss_tensor / self.world_size).cpu().tolist()
+            stats = torch.tensor(
+                [
+                    loss_sum,
+                    loss_count,
+                    metric_sums['classification_loss'],
+                    metric_counts['classification_loss'],
+                    metric_sums['regression_loss'],
+                    metric_counts['regression_loss'],
+                    metric_sums['conservation_loss'],
+                    metric_counts['conservation_loss'],
+                    active_total,
+                    sample_total
+                ],
+                dtype=torch.float64,
+                device=self.device
+            )
+            dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+            (
+                loss_sum,
+                loss_count,
+                metric_sums['classification_loss'],
+                metric_counts['classification_loss'],
+                metric_sums['regression_loss'],
+                metric_counts['regression_loss'],
+                metric_sums['conservation_loss'],
+                metric_counts['conservation_loss'],
+                active_total,
+                sample_total
+            ) = stats.tolist()
         
         # Calculate epoch metrics
         metrics = {
-            'train_loss': np.mean(epoch_losses) if epoch_losses else 0.0,
-            'classification_loss': np.mean(epoch_metrics['classification_loss']) if epoch_metrics['classification_loss'] else 0.0,
-            'regression_loss': np.mean(epoch_metrics['regression_loss']) if epoch_metrics['regression_loss'] else 0.0,
-            'conservation_loss': np.mean(epoch_metrics['conservation_loss']) if epoch_metrics['conservation_loss'] else 0.0,
-            'active_fraction': np.mean(epoch_metrics['active_samples']) / inputs.size(0) if epoch_metrics['active_samples'] else 0.0
+            'train_loss': (loss_sum / loss_count) if loss_count > 0 else 0.0,
+            'classification_loss': (metric_sums['classification_loss'] / metric_counts['classification_loss']) if metric_counts['classification_loss'] > 0 else 0.0,
+            'regression_loss': (metric_sums['regression_loss'] / metric_counts['regression_loss']) if metric_counts['regression_loss'] > 0 else 0.0,
+            'conservation_loss': (metric_sums['conservation_loss'] / metric_counts['conservation_loss']) if metric_counts['conservation_loss'] > 0 else 0.0,
+            'active_fraction': (active_total / sample_total) if sample_total > 0 else 0.0
         }
         
         return metrics
@@ -431,13 +495,20 @@ class DataParallelTrainer:
     def validate_epoch(self, val_loader: DataLoader) -> Dict[str, float]:
         """Validate for one epoch."""
         self.model.eval()
-        val_losses = []
-        val_metrics = {
-            'classification_loss': [],
-            'regression_loss': [],
-            'conservation_loss': [],
-            'active_samples': []
+        val_loss_sum = 0.0
+        val_loss_count = 0.0
+        val_metric_sums = {
+            'classification_loss': 0.0,
+            'regression_loss': 0.0,
+            'conservation_loss': 0.0
         }
+        val_metric_counts = {
+            'classification_loss': 0.0,
+            'regression_loss': 0.0,
+            'conservation_loss': 0.0
+        }
+        val_active_total = 0.0
+        val_sample_total = 0.0
         
         with torch.no_grad():
             for bidx, (inputs, targets) in enumerate(val_loader):
@@ -465,31 +536,59 @@ class DataParallelTrainer:
                     loss_dict = self.loss_fn(predictions, targets)
                 
                 # Collect metrics
-                val_losses.append(loss_dict['total_loss'].item())
+                loss_val = loss_dict['total_loss'].item()
+                val_loss_sum += loss_val
+                val_loss_count += 1.0
                 for key, value in loss_dict.items():
-                    if key in val_metrics:
-                        # Handle both tensor and scalar values
-                        if hasattr(value, 'item'):
-                            val_metrics[key].append(value.item())
-                        else:
-                            val_metrics[key].append(float(value))
+                    if key in val_metric_sums:
+                        metric_value = value.item() if hasattr(value, 'item') else float(value)
+                        val_metric_sums[key] += metric_value
+                        val_metric_counts[key] += 1.0
                 
-                active_count = targets['is_active'].sum().item()
-                val_metrics['active_samples'].append(active_count)
+                if 'is_active' in targets:
+                    active_count = targets['is_active'].sum().item()
+                    val_active_total += active_count
+                    val_sample_total += targets['is_active'].numel()
         
         # Synchronize metrics across processes for distributed training
         if self.is_distributed:
-            val_loss_tensor = torch.tensor(val_losses).to(self.device)
-            dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM)
-            val_losses = (val_loss_tensor / self.world_size).cpu().tolist()
+            val_stats = torch.tensor(
+                [
+                    val_loss_sum,
+                    val_loss_count,
+                    val_metric_sums['classification_loss'],
+                    val_metric_counts['classification_loss'],
+                    val_metric_sums['regression_loss'],
+                    val_metric_counts['regression_loss'],
+                    val_metric_sums['conservation_loss'],
+                    val_metric_counts['conservation_loss'],
+                    val_active_total,
+                    val_sample_total
+                ],
+                dtype=torch.float64,
+                device=self.device
+            )
+            dist.all_reduce(val_stats, op=dist.ReduceOp.SUM)
+            (
+                val_loss_sum,
+                val_loss_count,
+                val_metric_sums['classification_loss'],
+                val_metric_counts['classification_loss'],
+                val_metric_sums['regression_loss'],
+                val_metric_counts['regression_loss'],
+                val_metric_sums['conservation_loss'],
+                val_metric_counts['conservation_loss'],
+                val_active_total,
+                val_sample_total
+            ) = val_stats.tolist()
         
         # Calculate validation metrics
         metrics = {
-            'val_loss': np.mean(val_losses) if val_losses else 0.0,
-            'val_classification_loss': np.mean(val_metrics['classification_loss']) if val_metrics['classification_loss'] else 0.0,
-            'val_regression_loss': np.mean(val_metrics['regression_loss']) if val_metrics['regression_loss'] else 0.0,
-            'val_conservation_loss': np.mean(val_metrics['conservation_loss']) if val_metrics['conservation_loss'] else 0.0,
-            'val_active_fraction': np.mean(val_metrics['active_samples']) / inputs.size(0) if val_metrics['active_samples'] else 0.0
+            'val_loss': (val_loss_sum / val_loss_count) if val_loss_count > 0 else 0.0,
+            'val_classification_loss': (val_metric_sums['classification_loss'] / val_metric_counts['classification_loss']) if val_metric_counts['classification_loss'] > 0 else 0.0,
+            'val_regression_loss': (val_metric_sums['regression_loss'] / val_metric_counts['regression_loss']) if val_metric_counts['regression_loss'] > 0 else 0.0,
+            'val_conservation_loss': (val_metric_sums['conservation_loss'] / val_metric_counts['conservation_loss']) if val_metric_counts['conservation_loss'] > 0 else 0.0,
+            'val_active_fraction': (val_active_total / val_sample_total) if val_sample_total > 0 else 0.0
         }
         
         return metrics
@@ -549,8 +648,7 @@ class DataParallelTrainer:
             epoch_start_time = time.time()
             
             # Set epoch for distributed sampler (if used)
-            if hasattr(train_loader.sampler, 'set_epoch'):
-                train_loader.sampler.set_epoch(epoch)
+            self._set_epoch_for_loader(train_loader, epoch)
             # Training phase
             train_metrics = self.train_epoch(train_loader)
             # Validation phase
@@ -575,6 +673,11 @@ class DataParallelTrainer:
             else:
                 self.patience_counter += 1
                 is_best = False
+
+            if self.is_distributed and dist.is_initialized():
+                best_tensor = torch.tensor(self.best_val_loss, dtype=torch.float64, device=self.device)
+                dist.broadcast(best_tensor, src=0)
+                self.best_val_loss = best_tensor.item()
             
             # Save checkpoint (only on main process)
             self.save_checkpoint(all_metrics, is_best)
@@ -590,7 +693,7 @@ class DataParallelTrainer:
                     preds_all = {k: [] for k in ['qrtend', 'nctend', 'nrtend', 'qctend', 'is_active']}
                     trues_all = {k: [] for k in ['qrtend_TAU', 'nctend_TAU', 'nrtend_TAU', 'qctend_TAU', 'is_active']}
                     with torch.no_grad():
-                        for inputs, targets in val_loader:
+                        for batch_idx, (inputs, targets) in enumerate(val_loader):
                             inputs = inputs.to(self.device, non_blocking=True)
                             targ_dev = {k: v.to(self.device, non_blocking=True) for k, v in targets.items()}
                             out = self.model(inputs)
@@ -601,6 +704,8 @@ class DataParallelTrainer:
                             for key in ['qrtend_TAU', 'nctend_TAU', 'nrtend_TAU', 'qctend_TAU', 'is_active']:
                                 if key in targ_dev:
                                     trues_all[key].append(targ_dev[key].detach().float().view(-1).cpu().numpy())
+                            if self.wandb_max_val_batches and (batch_idx + 1) >= self.wandb_max_val_batches:
+                                break
                     # Concatenate
                     for k in preds_all:
                         if preds_all[k]:
@@ -763,10 +868,32 @@ class DataParallelTrainer:
                                 bins = np.linspace(min_val, max_val, 50)
                                 
                                 # Plot overlaid histograms
-                                ax.hist(y_true, bins=bins, alpha=0.7, label='True', 
-                                       color='blue', density=False)
-                                ax.hist(y_pred, bins=bins, alpha=0.7, label='Predicted', 
-                                       color='red', density=False)
+                                true_counts, _, _ = ax.hist(
+                                    y_true,
+                                    bins=bins,
+                                    alpha=0.7,
+                                    label='True',
+                                    color='blue',
+                                    density=False
+                                )
+                                pred_counts, _, _ = ax.hist(
+                                    y_pred,
+                                    bins=bins,
+                                    alpha=0.7,
+                                    label='Predicted',
+                                    color='red',
+                                    density=False
+                                )
+
+                                # Apply log-scale to counts
+                                positive_counts = np.concatenate(
+                                    [true_counts[true_counts > 0], pred_counts[pred_counts > 0]]
+                                )
+                                if positive_counts.size:
+                                    ax.set_ylim(bottom=positive_counts.min())
+                                else:
+                                    ax.set_ylim(bottom=1.0)
+                                ax.set_yscale('log')
                                 
                                 ax.set_xlabel(f'{title} Values', fontsize=9)
                                 ax.set_ylabel('Count', fontsize=9)
@@ -802,6 +929,9 @@ class DataParallelTrainer:
                 # Store history
                 self.train_losses.append(train_metrics['train_loss'])
                 self.val_losses.append(val_metrics['val_loss'])
+            
+            if self.is_distributed and dist.is_initialized():
+                dist.barrier()
             
             # Early stopping
             if self.patience_counter >= self.early_stopping_patience:
