@@ -74,7 +74,10 @@ class OptimizedStreamingDataset(IterableDataset):
         quantile_n_quantiles: int = 1000,
         quantile_subsample: int = 100000,
         rank: int = 0,
-        world_size: int = 1
+        world_size: int = 1,
+        nrtend_arcsinh_transform: bool = False,
+        nrtend_arcsinh_threshold: float = 1.0e-3,
+        nrtend_regime_threshold: Optional[float] = None
     ):
         """Initialize optimized streaming dataset."""
         super().__init__()
@@ -107,6 +110,17 @@ class OptimizedStreamingDataset(IterableDataset):
         self.quantile_subsample = int(quantile_subsample)
         self.rank = rank
         self.world_size = max(1, world_size)
+        
+        # Inverse hyperbolic sine (arcsinh) transform for nrtend
+        self.nrtend_arcsinh_transform = bool(nrtend_arcsinh_transform)
+        self.nrtend_arcsinh_threshold = float(nrtend_arcsinh_threshold)
+
+        # MoE regime labels: 0=near-zero, 1=negative (self-collection), 2=positive (rain formation)
+        self.nrtend_regime_threshold = float(nrtend_regime_threshold) if nrtend_regime_threshold is not None else None
+        if self.nrtend_arcsinh_transform:
+            logger.info(
+                f"nrtend arcsinh transform ENABLED: y' = arcsinh(y / {self.nrtend_arcsinh_threshold})"
+            )
         
         # Initialize random state
         self.rng = np.random.RandomState(random_seed)
@@ -343,45 +357,41 @@ class OptimizedStreamingDataset(IterableDataset):
                 logger.warning("Column 'qctend_TAU' missing from chunk; skipping chunk")
                 return None
 
-            mask = (np.abs(chunk["qctend_TAU"]) > self.active_threshold) #& (np.abs(chunk["qctend_TAU"]) < 1e-5)
+            # Active filter: always kept as the base mask
+            mask = (np.abs(chunk["qctend_TAU"]) > self.active_threshold)
 
+            # --- ACTIVE FILTERS ---
+            # Filter 1: CLOUD > cloud_threshold
             if self.cloud_threshold is not None:
                 if "CLOUD" in chunk.columns:
                     mask &= chunk["CLOUD"] > self.cloud_threshold
                 else:
                     logger.warning("Column 'CLOUD' missing; cloud threshold filter skipped")
 
+            # Filter 2: QC_TAU_in > mass_input_threshold
             if self.mass_input_threshold is not None:
-                missing_mass_cols = []
-                #for mass_col in ("QC_TAU_in", "QR_TAU_in"):
-                for mass_col in ["QC_TAU_in"]:
-                    if mass_col in chunk.columns:
-                        mask &= chunk[mass_col] > self.mass_input_threshold
-                    else:
-                        missing_mass_cols.append(mass_col)
-                if missing_mass_cols:
-                    logger.warning(
-                        "Missing mass columns for filtering: %s; skipping their thresholds",
-                        ", ".join(missing_mass_cols)
-                    )
+                if "QC_TAU_in" in chunk.columns:
+                    mask &= chunk["QC_TAU_in"] > self.mass_input_threshold
+                else:
+                    logger.warning("Column 'QC_TAU_in' missing; mass input threshold filter skipped")
 
+            # --- DISABLED FILTERS ---
             #if self.rho_threshold is not None:
             #    if "RHO_CLUBB" in chunk.columns:
             #        mask &= chunk["RHO_CLUBB"] > self.rho_threshold
             #    else:
             #        logger.warning("Column 'RHO_CLUBB' missing; rho threshold filter skipped")
 
-            if self.nrtend_threshold is not None:
-                if "nrtend_TAU" in chunk.columns:
-                    mask &= np.abs(chunk["nrtend_TAU"]) > self.nrtend_threshold
-                else:
-                    logger.warning("Column 'nrtend_TAU' missing; nrtend threshold filter skipped")
+            #if self.nrtend_threshold is not None:
+            #    if "nrtend_TAU" in chunk.columns:
+            #        mask &= np.abs(chunk["nrtend_TAU"]) > self.nrtend_threshold
+            #    else:
+            #        logger.warning("Column 'nrtend_TAU' missing; nrtend threshold filter skipped")
 
-            if "QC_TAU_in" in chunk.columns and "QR_TAU_in" in chunk.columns:
-                # Ensure values are finite before transforms
-                mask &= np.isfinite(chunk["QC_TAU_in"]) & np.isfinite(chunk["QR_TAU_in"])
-            if "RHO_CLUBB" in chunk.columns:
-                mask &= np.isfinite(chunk["RHO_CLUBB"])
+            #if "QC_TAU_in" in chunk.columns and "QR_TAU_in" in chunk.columns:
+            #    mask &= np.isfinite(chunk["QC_TAU_in"]) & np.isfinite(chunk["QR_TAU_in"])
+            #if "RHO_CLUBB" in chunk.columns:
+            #    mask &= np.isfinite(chunk["RHO_CLUBB"])
 
             if not np.any(mask):
                 return None
@@ -391,6 +401,12 @@ class OptimizedStreamingDataset(IterableDataset):
             # 2. Create active/quiescent labels from the ORIGINAL data first (post-filter)
             chunk["is_active"] = (np.abs(chunk["qctend_TAU"]) > self.active_threshold).astype(float)
 
+            # 2b. MoE regime labels from RAW nrtend_TAU (before any transform)
+            if self.nrtend_regime_threshold is not None and "nrtend_TAU" in chunk.columns:
+                eps = self.nrtend_regime_threshold
+                chunk["nrtend_regime"] = 0  # near-zero
+                chunk.loc[chunk["nrtend_TAU"] < -eps, "nrtend_regime"] = 1  # self-collection
+                chunk.loc[chunk["nrtend_TAU"] > eps, "nrtend_regime"] = 2   # rain formation
 
             # 3. Input transformation (vectorized)
             if self.input_transform == "log10":
@@ -406,12 +422,21 @@ class OptimizedStreamingDataset(IterableDataset):
             # Output transformation: only apply log10 here; quantile done later in transform stage
             if self.output_transform == "log10":
                 output_log_cols = ["qctend_TAU", "nctend_TAU", "nrtend_TAU", "qrtend_TAU"]
+                # If arcsinh is enabled for nrtend, exclude it from log10 transform
+                if self.nrtend_arcsinh_transform:
+                    output_log_cols = [c for c in output_log_cols if c != "nrtend_TAU"]
                 for col in output_log_cols:
                     if col in chunk.columns:
                         epsilon = 1e-10
                         sign = np.sign(chunk[col])
                         abs_val = np.abs(chunk[col]) + epsilon
                         chunk[col] = sign * np.log10(abs_val)
+            
+            # Apply arcsinh transform to nrtend_TAU if enabled: y' = arcsinh(y / c)
+            if self.nrtend_arcsinh_transform:
+                if "nrtend_TAU" in chunk.columns:
+                    c = self.nrtend_arcsinh_threshold
+                    chunk["nrtend_TAU"] = np.arcsinh(chunk["nrtend_TAU"] / c)
             
             
             # 4. Apply sampling if needed
@@ -422,6 +447,8 @@ class OptimizedStreamingDataset(IterableDataset):
             
             # 5. Ensure required columns exist and remove NaN
             required_cols = self.input_cols + self.output_cols + ["is_active"]
+            if self.nrtend_regime_threshold is not None and "nrtend_regime" in chunk.columns:
+                required_cols = required_cols + ["nrtend_regime"]
             missing_cols = [col for col in required_cols if col not in chunk.columns]
             if missing_cols:
                 logger.warning(f"Missing columns: {missing_cols}")
@@ -459,6 +486,9 @@ class OptimizedStreamingDataset(IterableDataset):
         # Create all target arrays at once (vectorized)
         targets_data = {}
         targets_data['is_active'] = chunk['is_active'].values.reshape(-1, 1)
+
+        if "nrtend_regime" in chunk.columns:
+            targets_data["nrtend_regime"] = chunk["nrtend_regime"].values.reshape(-1, 1)
 
         # Outputs matrix in configured column order
         outputs_matrix = None
@@ -692,15 +722,20 @@ class OptimizedStreamingDataset(IterableDataset):
         return self._batch_generator()
     
     def __len__(self) -> int:
-        """Return estimated number of batches using ceiling division."""
+        """Return estimated number of batches using ceiling division.
+
+        Data is read in chunk_size-row chunks. _process_chunk_to_batches then
+        splits each chunk with batch_size as the step size.  When chunk_size <
+        batch_size (the common case) every chunk produces exactly one batch of
+        up to chunk_size samples — NOT batch_size samples.  Using batch_size as
+        the denominator therefore underestimates the batch count by a factor of
+        batch_size / chunk_size.  The correct effective yield granularity is
+        min(chunk_size, batch_size).
+        """
         import math
-        
-        # For very large datasets, disable length estimation to avoid warnings
-        # This is controlled by a config parameter
-        #if hasattr(self, 'disable_length_estimation') and self.disable_length_estimation:
-        #    return 1  # Return minimal value to avoid issues
-            
-        total_batches = max(1, math.ceil(self.estimated_size / self.batch_size))
+
+        effective_yield_size = min(self.chunk_size, self.batch_size)
+        total_batches = max(1, math.ceil(self.estimated_size / effective_yield_size))
         if self.world_size > 1:
             total_batches = max(1, math.floor(total_batches / self.world_size))
         return total_batches
@@ -745,6 +780,14 @@ def create_optimized_streaming_loaders(
     active_threshold_value = data_config.get('active_threshold', 1e-15)
     if active_threshold_value is None:
         active_threshold_value = 1e-15
+
+    # Arcsinh transform settings for nrtend
+    nrtend_arcsinh_transform = bool(data_config.get('nrtend_arcsinh_transform', False))
+    nrtend_arcsinh_threshold = float(data_config.get('nrtend_arcsinh_threshold', 1e-3))
+
+    # MoE regime label threshold (None disables regime label computation)
+    nrtend_regime_threshold_val = data_config.get('nrtend_regime_threshold')
+    nrtend_regime_threshold = float(nrtend_regime_threshold_val) if nrtend_regime_threshold_val is not None else None
 
     # Create per-run scaler cache directory similar to checkpointing
     def _normalize_run_id(run_id: str) -> str:
@@ -828,7 +871,10 @@ def create_optimized_streaming_loaders(
                 quantile_n_quantiles=int(data_config.get('quantile_n_quantiles', 1000)),
                 quantile_subsample=int(data_config.get('quantile_subsample', 100000)),
                 rank=0,
-                world_size=1
+                world_size=1,
+                nrtend_arcsinh_transform=nrtend_arcsinh_transform,
+                nrtend_arcsinh_threshold=nrtend_arcsinh_threshold,
+                nrtend_regime_threshold=nrtend_regime_threshold,
             )
             fit_dataset.fit_scalers(n_samples_for_fitting=data_config.get('scaler_fit_samples', 100000))
             scaler = fit_dataset.input_scaler
@@ -878,7 +924,10 @@ def create_optimized_streaming_loaders(
         quantile_n_quantiles=int(data_config.get('quantile_n_quantiles', 1000)),
         quantile_subsample=int(data_config.get('quantile_subsample', 100000)),
         rank=rank if is_distributed else 0,
-        world_size=world_size if is_distributed else 1
+        world_size=world_size if is_distributed else 1,
+        nrtend_arcsinh_transform=nrtend_arcsinh_transform,
+        nrtend_arcsinh_threshold=nrtend_arcsinh_threshold,
+        nrtend_regime_threshold=nrtend_regime_threshold,
     )
     
     logger.info("Creating optimized validation dataset...")
@@ -910,7 +959,10 @@ def create_optimized_streaming_loaders(
         quantile_n_quantiles=int(data_config.get('quantile_n_quantiles', 1000)),
         quantile_subsample=int(data_config.get('quantile_subsample', 100000)),
         rank=rank if is_distributed else 0,
-        world_size=world_size if is_distributed else 1
+        world_size=world_size if is_distributed else 1,
+        nrtend_arcsinh_transform=nrtend_arcsinh_transform,
+        nrtend_arcsinh_threshold=nrtend_arcsinh_threshold,
+        nrtend_regime_threshold=nrtend_regime_threshold,
     )
     
     # Create data loaders (batch_size=None since we're yielding pre-batched data)

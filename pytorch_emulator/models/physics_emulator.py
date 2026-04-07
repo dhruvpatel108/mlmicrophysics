@@ -1,7 +1,8 @@
 """
 Constraint-Aware Microphysics Emulator
 
-Simple, clean implementation of multi-head neural network for cloud microphysics.
+Multi-head neural network for cloud microphysics with shared backbone,
+per-variable regression heads, and hard-coded mass conservation.
 """
 
 import torch
@@ -10,15 +11,48 @@ import torch.nn.functional as F
 from typing import Dict, List
 
 
+def _get_activation(name: str):
+    """Return activation module by name (relu, silu, etc.)."""
+    name = (name or "relu").lower()
+    if name == "relu":
+        return nn.ReLU()
+    if name == "silu":
+        return nn.SiLU()
+    raise ValueError(f"Unknown activation: {name}. Supported: relu, silu")
+
+
+def build_head(
+    input_dim: int,
+    hidden_dims: List[int],
+    output_dim: int = 1,
+    activation: str = "relu",
+    dropout: float = 0.0,
+) -> nn.Sequential:
+    """Build a multi-layer head (classification or regression).
+
+    Produces: Linear -> Activation -> Dropout  (repeated per hidden_dim)
+              Linear -> output_dim              (final projection)
+    """
+    layers: List[nn.Module] = []
+    prev = input_dim
+    for dim in hidden_dims:
+        layers.append(nn.Linear(prev, dim))
+        layers.append(_get_activation(activation))
+        layers.append(nn.Dropout(dropout))
+        prev = dim
+    layers.append(nn.Linear(prev, output_dim))
+    return nn.Sequential(*layers)
+
+
 class ConstraintAwareEmulator(nn.Module):
     """
     Constraint-aware multi-head neural network for microphysics emulation.
-    
+
     Architecture:
     - Shared backbone for feature extraction
-    - Classification head for active/quiescent regime detection  
-    - Regression heads with physical constraint activations
-    - Mass conservation enforcement via post-processing
+    - Classification head for active/quiescent regime detection
+    - Regression heads for qrtend, nctend, nrtend
+    - Mass conservation enforcement: qctend = -qrtend
     """
     
     def __init__(
@@ -26,8 +60,8 @@ class ConstraintAwareEmulator(nn.Module):
         input_dim: int = 11,
         shared_dims: List[int] = [256, 128, 64],
         head_dims: List[int] = [64, 32, 16],
-        #head_dim: int = 32,
-        dropout: float = 0.1
+        dropout: float = 0.1,
+        activation: str = "relu"
     ):
         super().__init__()
         
@@ -35,112 +69,26 @@ class ConstraintAwareEmulator(nn.Module):
         self.shared_dims = shared_dims
         self.head_dims = head_dims
         self.dropout = dropout
+        self.activation_name = (activation or "relu").lower()
         
-        # Build shared backbone
+        # Shared backbone
         backbone_layers = []
         prev_dim = input_dim
-        
         for dim in shared_dims:
             backbone_layers.extend([
                 nn.Linear(prev_dim, dim),
-                nn.ReLU(),
+                _get_activation(activation),
                 nn.Dropout(dropout)
             ])
             prev_dim = dim
-        
         self.shared_backbone = nn.Sequential(*backbone_layers)
-        
-        """
-        # Classification head: Is_Active (active vs quiescent)
-        self.classifier_head = nn.Sequential(
-            nn.Linear(shared_dims[-1], head_dims[0]),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(head_dims[0], head_dims[1]),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(head_dims[1], 1)
-            # Removed: nn.Sigmoid() - BCEWithLogitsLoss handles sigmoid internally
-        )
 
-        # Regression heads with constraint activations
-        # qrtend: Must be ≥ 0 (rain formation is always positive)
-        # For log-transformed data we don't need to apply ReLU to ensure ≥ 0
-        self.qrtend_head = nn.Sequential(
-            nn.Linear(shared_dims[-1], head_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(head_dim, 1),
-            #nn.ReLU()  # Ensures ≥ 0
-        )
-        
-        # nctend: Must be ≤ 0 (cloud droplet loss)
-        self.nctend_head = nn.Sequential(
-            nn.Linear(shared_dims[-1], head_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(head_dim, 1)
-            # Will apply -ReLU in forward to ensure ≤ 0
-        )
-        
-        # nrtend: Can be positive or negative (rain number can increase/decrease)
-        self.nrtend_head = nn.Sequential(
-            nn.Linear(shared_dims[-1], head_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(head_dim, 1)
-            # No constraint activation
-        )
-        """
-        # Deeper heads for reacher representation 
-        # starting with shared_dims[-1] and going through head_dims ending with 1
-        # Classification head
-        classifier_head_layers = []
-        input_dim = shared_dims[-1]
-        for i in range(len(head_dims)):
-            classifier_head_layers.append(nn.Linear(input_dim, head_dims[i]))
-            classifier_head_layers.append(nn.ReLU())
-            classifier_head_layers.append(nn.Dropout(dropout))
-            input_dim = head_dims[i]
-        classifier_head_layers.append(nn.Linear(input_dim, 1))
-        self.classifier_head = nn.Sequential(*classifier_head_layers)
+        backbone_out = shared_dims[-1]
+        self.classifier_head = build_head(backbone_out, head_dims, 1, activation, dropout)
+        self.qrtend_head = build_head(backbone_out, head_dims, 1, activation, dropout)
+        self.nctend_head = build_head(backbone_out, head_dims, 1, activation, dropout)
+        self.nrtend_head = build_head(backbone_out, head_dims, 1, activation, dropout)
 
-        # Regression heads with constraint activations
-        # qrtend: Must be ≥ 0 (rain formation is always positive)
-        # For log-transformed data we don't need to apply ReLU to ensure ≥ 0
-        qrtend_head_layers = []
-        input_dim = shared_dims[-1]
-        for i in range(len(head_dims)):
-            qrtend_head_layers.append(nn.Linear(input_dim, head_dims[i]))
-            qrtend_head_layers.append(nn.ReLU())
-            qrtend_head_layers.append(nn.Dropout(dropout))
-            input_dim = head_dims[i]
-        qrtend_head_layers.append(nn.Linear(input_dim, 1))
-        self.qrtend_head = nn.Sequential(*qrtend_head_layers)
-
-        # nctend: Must be ≤ 0 (cloud droplet loss)
-        nctend_head_layers = []
-        input_dim = shared_dims[-1]
-        for i in range(len(head_dims)):
-            nctend_head_layers.append(nn.Linear(input_dim, head_dims[i]))
-            nctend_head_layers.append(nn.ReLU())
-            nctend_head_layers.append(nn.Dropout(dropout))
-            input_dim = head_dims[i]
-        nctend_head_layers.append(nn.Linear(input_dim, 1))
-        self.nctend_head = nn.Sequential(*nctend_head_layers)
-
-        # nrtend: Can be positive or negative (rain number can increase/decrease)
-        nrtend_head_layers = []
-        input_dim = shared_dims[-1]
-        for i in range(len(head_dims)):
-            nrtend_head_layers.append(nn.Linear(input_dim, head_dims[i]))
-            nrtend_head_layers.append(nn.ReLU())
-            nrtend_head_layers.append(nn.Dropout(dropout))
-            input_dim = head_dims[i]
-        nrtend_head_layers.append(nn.Linear(input_dim, 1))
-        self.nrtend_head = nn.Sequential(*nrtend_head_layers)
-
-        # Initialize weights
         self._init_weights()
     
     def _init_weights(self):
@@ -161,35 +109,25 @@ class ConstraintAwareEmulator(nn.Module):
         Returns:
             Dictionary containing:
             - 'is_active': Classification probabilities [batch_size, 1]
-            - 'qrtend': Rain tendency  [batch_size, 1]  
-            - 'nctend': Cloud droplet number tendency  [batch_size, 1]
+            - 'is_active_logits': Raw logits for BCEWithLogitsLoss [batch_size, 1]
+            - 'qrtend': Rain tendency [batch_size, 1]
+            - 'nctend': Cloud droplet number tendency [batch_size, 1]
             - 'nrtend': Rain number tendency [batch_size, 1]
             - 'qctend': Cloud water tendency (derived) [batch_size, 1]
         """
-        # Shared feature extraction
         shared_features = self.shared_backbone(x)
         
-        # Classification: Active vs quiescent regime (raw logits for loss, sigmoid for output)
         is_active_logits = self.classifier_head(shared_features)
-        is_active = torch.sigmoid(is_active_logits)  # Apply sigmoid for final output
+        is_active = torch.sigmoid(is_active_logits)
         
-        # Regression heads with physical constraints
-        qrtend = self.qrtend_head(shared_features)  # For log-transformed data we don't need to apply ReLU to ensure ≥ 0
-        
-        # For nctend: Apply -ReLU to ensure ≤0
-        # For log-transformed data we don't need to apply ReLU to ensure ≤ 0
-        #nctend_positive = self.nctend_head(shared_features)
-        #nctend = -F.relu(nctend_positive)  # Ensures ≤0
+        qrtend = self.qrtend_head(shared_features)
         nctend = self.nctend_head(shared_features)
-        
-        nrtend = self.nrtend_head(shared_features)  # No constraints
-        
-        # Mass conservation: qctend = -qrtend (hard-coded physics)
+        nrtend = self.nrtend_head(shared_features)
         qctend = -qrtend
         
         return {
-            'is_active': is_active,  # Sigmoid output for predictions
-            'is_active_logits': is_active_logits,  # Raw logits for BCEWithLogitsLoss
+            'is_active': is_active,
+            'is_active_logits': is_active_logits,
             'qrtend': qrtend,
             'nctend': nctend, 
             'nrtend': nrtend,

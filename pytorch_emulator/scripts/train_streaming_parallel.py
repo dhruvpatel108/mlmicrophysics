@@ -83,31 +83,78 @@ def load_config(config_path: str) -> Dict:
 
 
 def setup_model_and_loss(config: Dict, device: torch.device) -> tuple:
-    """Setup model and loss function."""
+    """Setup model and loss function.
+
+    Dispatches on ``model.architecture`` in config:
+    - ``"standard"`` (default): ConstraintAwareEmulator + ConstraintAwareLoss
+    - ``"moe"``: MoEConstraintAwareEmulator + MoEConstraintAwareLoss
+    """
     model_config = config['model']
-    
-    # Create model
+
     # Backward-compat: accept 'head_dims' or fallback to single 'head_dim'
     head_dims = model_config.get('head_dims')
     if head_dims is None:
         single = model_config.get('head_dim')
         head_dims = [single] if single is not None else [64]
 
-    model = ConstraintAwareEmulator(
-        input_dim=model_config['input_dim'],
-        shared_dims=model_config['shared_dims'],
-        head_dims=head_dims,
-        dropout=model_config.get('dropout', 0.1)
-    )
-    
-    # Create loss function
-    loss_fn = ConstraintAwareLoss(
-        alpha=model_config.get('alpha', 0.3),
-        huber_delta=model_config.get('huber_delta', 1.0),
-        conservation_weight=model_config.get('conservation_weight', 0.1),
-        use_masking=model_config.get('use_masking', True)
-    )
-    
+    architecture = model_config.get('architecture', 'standard')
+
+    if architecture == 'moe':
+        from models.moe_emulator import MoEConstraintAwareEmulator
+        from models.losses import create_moe_loss
+
+        moe_cfg = model_config.get('moe', {})
+        model = MoEConstraintAwareEmulator(
+            input_dim=model_config['input_dim'],
+            shared_dims=model_config['shared_dims'],
+            head_dims=head_dims,
+            dropout=model_config.get('dropout', 0.0),
+            activation=model_config.get('activation', 'relu'),
+            n_experts=moe_cfg.get('n_experts', 3),
+            expert_hidden_dims=moe_cfg.get('expert_hidden_dims'),
+            router_hidden_dims=moe_cfg.get('router_hidden_dims'),
+            moe_activation=moe_cfg.get('activation', 'silu'),
+        )
+
+        # Load pretrained backbone + qrtend/nctend weights from a previous run
+        pretrained_ckpt = moe_cfg.get('pretrained_checkpoint')
+        if pretrained_ckpt:
+            logger.info(f"Loading pretrained weights from {pretrained_ckpt}")
+            model.load_pretrained_backbone_and_heads(pretrained_ckpt, device=device)
+
+        # Phase 1: freeze backbone + standard heads so only the MoE nrtend
+        # head (router + experts) is trained.
+        # Phase 2: set  model.moe.freeze_pretrained: false  in config and
+        #          lower the LR to ~1e-4 to fine-tune everything together.
+        if moe_cfg.get('freeze_pretrained', True):
+            model.freeze_backbone_and_standard_heads()
+            logger.info("Phase 1: backbone + qrtend/nctend heads FROZEN.")
+        else:
+            logger.info("Phase 2: ALL parameters are trainable (fine-tuning).")
+
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        frozen_params = total_params - trainable_params
+        logger.info(
+            f"MoE params  total={total_params:,}  trainable={trainable_params:,}  frozen={frozen_params:,}"
+        )
+
+        loss_fn = create_moe_loss(config)
+    else:
+        model = ConstraintAwareEmulator(
+            input_dim=model_config['input_dim'],
+            shared_dims=model_config['shared_dims'],
+            head_dims=head_dims,
+            dropout=model_config.get('dropout', 0.1),
+            activation=model_config.get('activation', 'relu')
+        )
+        loss_fn = ConstraintAwareLoss(
+            alpha=model_config.get('alpha', 0.3),
+            huber_delta=model_config.get('huber_delta', 1.0),
+            conservation_weight=model_config.get('conservation_weight', 0.1),
+            use_masking=model_config.get('use_masking', True)
+        )
+
     return model, loss_fn
 
 
@@ -319,15 +366,15 @@ def main():
             else:
                 trainer.model.load_state_dict(checkpoint['model_state_dict'])
             
-            # Load optimizer and scheduler state
-            #trainer.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            #if trainer.scheduler and checkpoint.get('scheduler_state_dict'):
-            #    trainer.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            # Load optimizer, scheduler, and AMP scaler state
+            trainer.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            if trainer.scheduler and checkpoint.get('scheduler_state_dict'):
+                trainer.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             if trainer.scaler and checkpoint.get('scaler_state_dict'):
                 trainer.scaler.load_state_dict(checkpoint['scaler_state_dict'])
             
-            # Load training state
-            trainer.epoch = checkpoint.get('epoch', 0)
+            # Load training state — start from the epoch AFTER the checkpoint
+            trainer.epoch = checkpoint.get('epoch', 0) + 1
             trainer.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
             
             if is_main_process:
@@ -356,15 +403,15 @@ def main():
         return True
         
     except KeyboardInterrupt:
-        if is_main_process:
-            logger.info("\n⚠️ Training interrupted by user")
+        logger.info(f"[rank {rank}] Training interrupted by user")
         return False
         
     except Exception as e:
-        if is_main_process:
-            logger.error(f"❌ Training failed: {e}")
-            import traceback
-            traceback.print_exc()
+        import traceback
+        logger.error(f"[rank {rank}] Training failed: {e}")
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
         return False
     
     finally:

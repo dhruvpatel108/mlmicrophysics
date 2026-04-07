@@ -3,12 +3,16 @@ Constraint-Aware Loss Functions
 
 Custom loss functions for the constraint-aware microphysics emulator,
 combining classification and regression objectives with physical constraints.
+
+Includes:
+- ConstraintAwareLoss: original loss (classification + regression).
+- MoEConstraintAwareLoss: regression-only loss with MoE router auxiliary term.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 
 class ConstraintAwareLoss(nn.Module):
@@ -153,6 +157,136 @@ def create_constraint_aware_loss(config: Dict) -> ConstraintAwareLoss:
         huber_delta=loss_config.get('huber_delta', 1.0),
         conservation_weight=loss_config.get('conservation_weight', 0.1),
         use_masking=loss_config.get('use_masking', True)
+    )
+
+
+# ---------------------------------------------------------------------------
+# MoE loss  (regime-supervised)
+# ---------------------------------------------------------------------------
+
+class MoEConstraintAwareLoss(nn.Module):
+    """Loss for MoEConstraintAwareEmulator with explicit regime supervision.
+
+    Total loss:  L = L_reg + lambda * L_gate + beta * L_entropy
+
+    (A) L_reg   -- Huber regression loss on qrtend, nctend, nrtend.
+    (B) L_gate  -- CrossEntropy(router_logits, regime_labels).
+                   regime_labels are computed from raw nrtend_TAU in the
+                   data loader:  0=near-zero, 1=negative, 2=positive.
+    (C) L_entropy -- Negative entropy of gate probabilities to encourage
+                     confident routing:  -(p * log(p)).sum(dim=1).mean()
+
+    Args:
+        huber_delta:      Delta for Huber regression loss.
+        gate_loss_weight:  lambda -- weight on L_gate  (0.75 for Phase 1A).
+        entropy_weight:    beta   -- weight on L_entropy (0.01).
+        use_masking:       Mask regression loss to active samples only.
+    """
+
+    def __init__(
+        self,
+        huber_delta: float = 1.0,
+        gate_loss_weight: float = 0.75,
+        entropy_weight: float = 0.01,
+        use_masking: bool = True,
+    ):
+        super().__init__()
+        self.huber_delta = huber_delta
+        self.gate_loss_weight = gate_loss_weight
+        self.entropy_weight = entropy_weight
+        self.use_masking = use_masking
+
+        self.huber_loss = nn.HuberLoss(delta=huber_delta)
+        self.ce_loss = nn.CrossEntropyLoss()
+
+    def forward(
+        self,
+        predictions: Dict[str, torch.Tensor],
+        targets: Dict[str, torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Args:
+            predictions: Must contain 'qrtend', 'nctend', 'nrtend',
+                         'router_logits' [B, 3].
+            targets:     Must contain 'qrtend_TAU', 'nctend_TAU',
+                         'nrtend_TAU', 'is_active', 'nrtend_regime' [B, 1].
+        """
+        device = predictions["qrtend"].device
+        batch_size = predictions["qrtend"].shape[0]
+
+        # ── (A) Regression loss ────────────────────────────────────
+        if self.use_masking:
+            active_mask = targets["is_active"].bool().squeeze()
+            n_active = active_mask.sum().item()
+
+            if n_active > 0:
+                qr_loss = self.huber_loss(
+                    predictions["qrtend"][active_mask],
+                    targets["qrtend_TAU"][active_mask],
+                )
+                nc_loss = self.huber_loss(
+                    predictions["nctend"][active_mask],
+                    targets["nctend_TAU"][active_mask],
+                )
+                nr_loss = self.huber_loss(
+                    predictions["nrtend"][active_mask],
+                    targets["nrtend_TAU"][active_mask],
+                )
+                regression_loss = (qr_loss + nc_loss + nr_loss) / 3.0
+            else:
+                nr_loss = torch.tensor(0.0, device=device)
+                regression_loss = torch.tensor(0.0, device=device)
+        else:
+            qr_loss = self.huber_loss(predictions["qrtend"], targets["qrtend_TAU"])
+            nc_loss = self.huber_loss(predictions["nctend"], targets["nctend_TAU"])
+            nr_loss = self.huber_loss(predictions["nrtend"], targets["nrtend_TAU"])
+            regression_loss = (qr_loss + nc_loss + nr_loss) / 3.0
+            n_active = batch_size
+
+        # ── (B) Gating loss (CrossEntropy on regime labels) ────────
+        router_logits = predictions["router_logits"]       # [B, 3]
+        regime_labels = targets["nrtend_regime"].long().squeeze(-1)  # [B]
+        gate_loss = self.ce_loss(router_logits, regime_labels)
+
+        # ── (C) Entropy regularisation ─────────────────────────────
+        p = F.softmax(router_logits, dim=-1)               # [B, 3]
+        log_p = torch.log(p + 1e-8)
+        entropy_loss = -(p * log_p).sum(dim=-1).mean()     # scalar
+
+        # ── Total ──────────────────────────────────────────────────
+        total_loss = (
+            regression_loss
+            + self.gate_loss_weight * gate_loss
+            + self.entropy_weight * entropy_loss
+        )
+
+        return {
+            "total_loss": total_loss,
+            "regression_loss": regression_loss,
+            "nrtend_regression_loss": nr_loss if isinstance(nr_loss, torch.Tensor) else torch.tensor(nr_loss, device=device),
+            "gate_loss": gate_loss,
+            "entropy_loss": entropy_loss,
+            "active_samples": n_active,
+        }
+
+    def get_loss_weights(self) -> Dict[str, float]:
+        return {
+            "huber_delta": self.huber_delta,
+            "gate_loss_weight": self.gate_loss_weight,
+            "entropy_weight": self.entropy_weight,
+            "use_masking": self.use_masking,
+        }
+
+
+def create_moe_loss(config: Dict) -> MoEConstraintAwareLoss:
+    """Factory function to create MoEConstraintAwareLoss from config."""
+    model_cfg = config.get("model", {})
+    moe_cfg = model_cfg.get("moe", {})
+    return MoEConstraintAwareLoss(
+        huber_delta=model_cfg.get("huber_delta", 1.0),
+        gate_loss_weight=moe_cfg.get("gate_loss_weight", 0.75),
+        entropy_weight=moe_cfg.get("entropy_weight", 0.01),
+        use_masking=model_cfg.get("use_masking", True),
     )
 
 
