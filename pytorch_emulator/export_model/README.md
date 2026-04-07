@@ -33,7 +33,6 @@ Helpful flags:
    1. `nctend`
    2. `nrtend`
    3. `qctend`
-   4. `is_active`
 4. Traces + freezes the model with `torch.jit.trace` and writes the TorchScript module to disk.
 5. Reloads the artifact and compares it with the eager model unless `--skip-verify` is supplied.
 

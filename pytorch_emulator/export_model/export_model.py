@@ -54,7 +54,7 @@ def load_model_config(config_path: Optional[Path]) -> Dict[str, Any]:
 
 def instantiate_model(model_cfg: Dict[str, Any]) -> ConstraintAwareEmulator:
     ctor_kwargs: Dict[str, Any] = {}
-    for key in ("input_dim", "shared_dims", "head_dims", "dropout"):
+    for key in ("input_dim", "shared_dims", "head_dims", "dropout", "activation"):
         if key in model_cfg:
             ctor_kwargs[key] = model_cfg[key]
 
